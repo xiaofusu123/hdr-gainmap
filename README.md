@@ -163,6 +163,11 @@ avif.encode(q16, transfer="PQ", bits=12, quality=100, dpi=240)   # → (blob, bi
 - **PQ 直传在 SDR 环境下必然发灰**：SDR 白(203 nits)只占码值 0.58，没有 HDR 渲染链路时它就是灰的。
 - **HEIF 无 DPI 字段**：只能借 EXIF，WIC 认、第三方 App 未必认。
 - **源图 ICC 被忽略**：整条管线按 sRGB 解释源像素；Display-P3 源需先转 sRGB，否则颜色会偏。
+- **HEIC/AVIF 的 SDR 回退取决于查看器**：HEIC/AVIF 里只有一张 HDR 图，没有独立的 SDR 基图，
+  SDR 模式下由查看器自行色调映射。实测部分安卓 16 设备会把 PQ 码值整体抬高（连 gain=1 的纯 SDR
+  内容套 PQ 也偏亮），此时 HEIC/AVIF 的 SDR 观感会过曝，而同一文件的 HDR 显示正常。
+  这是设备映射问题，未在编码端做"中间调压暗"补偿（实测 0.70 系数能让 SDR 接近正确，
+  代价是 HDR 中间调暗 0.5 档）。需要 SDR 准确时优先发 Ultra HDR JPEG。
 - **Ultra HDR 默认不写 ISO 21496-1 元数据**：安卓 16 的 HDR 解码路径会优先读 ISO，而它把本工具
   写的 61 字节解释错，导致**白色区域变黑**；只留 XMP `hdrgm` 时同一文件显示正常。需要 ISO 元数据
   的场合可传 `write_iso=True`（生成后务必在目标机验证）。
