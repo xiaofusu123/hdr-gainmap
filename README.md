@@ -5,6 +5,8 @@ summary: 把 8bit SDR 插画转成五种 HDR 封装，用自适应光传输模�
 description: hdr-gainmap 不靠 AI 提亮，而是用光照场、扩散、环境光遮蔽与大面积白墙惩罚判断哪里在发光，再按同一条增益曲线生成 Ultra HDR JPEG、16bit PNG、10/12bit HEIC 和 12bit AVIF。默认 q100、PNG 无损、AVIF 优先 4:4:4，并内置容器合规校验。
 ---
 
+**简体中文** | [English](README.en.md)
+
 **把 8bit SDR 插画转成 HDR 母版**：一条命令输出 Ultra HDR JPEG、16bit PNG、10/12bit HEIC 与 12bit AVIF，不设档位，增益参数按每张图自己的光影分布计算。
 
 **版本：Beta 0.1.0**（首个公开测试版）。

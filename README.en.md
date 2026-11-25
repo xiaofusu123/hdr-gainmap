@@ -5,6 +5,8 @@ summary: Turn 8-bit SDR illustrations into five HDR deliverables, lifting only w
 description: hdr-gainmap estimates where light comes from with an illumination field, diffusion, ambient occlusion and a flat-area penalty, then encodes Ultra HDR JPEG, 16-bit PNG, 10/12-bit HEIC and 12-bit AVIF from one gain curve.
 ---
 
+[简体中文](README.md) | **English**
+
 **Turn 8-bit SDR illustrations into HDR masters**: one command produces Ultra HDR JPEG, 16-bit PNG, 10/12-bit HEIC and 12-bit AVIF. There are no presets — the gain parameters are derived from each image's own light distribution.
 
 **Version: Beta 0.1.0** (first public beta).
