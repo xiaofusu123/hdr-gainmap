@@ -1,6 +1,6 @@
 """AVIF（AV1 still image）封装：借 ffmpeg 编码，再自己补 nclx 色彩标签。
 
-为什么不用 ffmpeg 直接写：ffmpeg 9.1 的 `avif` muxer 会把 `colr/nclx` 写成
+为什么不用 ffmpeg 直接写：ffmpeg 9.x 的 `avif` muxer 会把 `colr/nclx` 写成
 `primaries=2, transfer=2`（unspecified），即使命令行给了 `-color_primaries bt2020
 -color_trc smpte2084`。对这些字段来说等于没写，播放器只能靠猜。这里在编码后
 定位 `nclx` box 直接改写 7 个字节，成本几乎为零。
@@ -39,6 +39,10 @@ def _run(cmd: list[str], raw: bytes, out_path: Path) -> None:
 
 def _encode_once(q16: np.ndarray, out_path: Path, transfer: str, bits: int,
                  codec: str, crf: int, cpu_used: int, chroma: str = "444") -> None:
+    """跑一次 ffmpeg：rgb48 原始帧 → BT.2020 非恒定亮度 → yuv{444,420}p{10,12} → AVIF。
+
+    颜色矩阵在 scale 滤镜里完成，避免 ffmpeg 默认按 BT.601 转换导致偏色。
+    """
     h, w, _ = q16.shape
     pix_fmt = f"yuv{chroma}p{bits}le"
     cmd = [

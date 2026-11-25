@@ -1,4 +1,4 @@
-"""严格校验 HDR 产物：Ultra HDR JPEG / 16bit PQ PNG / 10bit HDR HEIC。
+"""严格校验 HDR 产物：Ultra HDR JPEG / 16bit PQ/HLG PNG / 10/12bit HDR HEIC / HDR AVIF。
 
 Ultra HDR 部分逐条镜像 Android Ultra HDR v1.1 与 libultrahdr 的
 ``hasValidMpfAssociation()``：任何一条不满足，解码器都会悄悄忽略增益图回退 SDR。

@@ -6,12 +6,12 @@
   png16     16bit PQ/HLG 的 HDR PNG（cICP 9/16/0/1）
   heic10    10/12bit PQ/HLG 的 HDR HEIC（nclx 9/16/9）
   avif      12bit PQ/HLG 的 HDR AVIF（ffmpeg + libaom，nclx 9/16/9）
-  ultrahdr  Ultra HDR（ISO 21496-1）JPEG 封装 —— 旧版产物，保留供校验/解析
+  ultrahdr  Ultra HDR JPEG（主图 + 增益图 + MPF + XMP + ISO 21496-1）封装与解析
   validate  产物合规校验（PNG cICP / HEIC nclx / AVIF nclx / Ultra HDR）
   pipeline  一条龙构建
   cli       命令行入口
 """
-__version__ = "2.1.0"
+__version__ = "0.1.0b1"
 
 from . import avif, color, gainmap, heic10, png16, ultrahdr  # noqa: F401
 from .pipeline import FORMATS, QUALITY, build               # noqa: F401

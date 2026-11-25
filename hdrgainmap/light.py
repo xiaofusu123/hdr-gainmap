@@ -44,11 +44,12 @@ def _upsample(y: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     x0 = np.clip(np.floor(xs), 0, y.shape[1] - 1).astype(np.int32)
     y1 = np.clip(y0 + 1, 0, y.shape[0] - 1)
     x1 = np.clip(x0 + 1, 0, y.shape[1] - 1)
-    fy = np.clip(ys - y0, 0, 1)[:, None]
-    fx = np.clip(xs - x0, 0, 1)[None, :]
-    top = y[np.ix_(y0, x0)] * (1 - fx) + y[np.ix_(y0, x1)] * fx
-    bot = y[np.ix_(y1, x0)] * (1 - fx) + y[np.ix_(y1, x1)] * fx
-    return (top * (1 - fy) + bot * fy).astype(np.float32)
+    fy = np.clip(ys - y0, 0, 1)[:, None].astype(np.float32)
+    fx = np.clip(xs - x0, 0, 1)[None, :].astype(np.float32)
+    # 先沿 y 插值成 (h, w_low)，再沿 x 插值：峰值内存从 2×O(h·w) 降到 O(h·w_low)，
+    # 4× 放大的亿像素图不会再因为这一步多占几百 MB。
+    tmp = y[y0] * (1.0 - fy) + y[y1] * fy
+    return (tmp[:, x0] * (1.0 - fx) + tmp[:, x1] * fx).astype(np.float32)
 
 
 def irradiance(y: np.ndarray, *, p_hi: float = 96.0, a_refl: float = 0.25,

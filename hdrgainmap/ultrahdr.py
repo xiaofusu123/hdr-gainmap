@@ -20,8 +20,9 @@
   且 ``offset`` **相对 MPF TIFF 头**而不是文件起点；
 * 主图长度 ↔ 增益图偏移必须迭代到不动点（XMP 里的 Item:Length 会改变长度）。
 
-元数据分工按规范：GContainer 与 ``hdrgm:Version`` 在主图 XMP，完整增益参数写在
-**增益图自己的 XMP** 里；ISO 21496-1 则主图只写版本存根、增益图写完整元数据。
+元数据分工：主图 XMP 带 GContainer 目录 + 完整 hdrgm 参数；增益图自己的 XMP
+也带一份完整 hdrgm 参数（部分解析器只读增益图的）。ISO 21496-1 则主图只写
+版本存根、增益图写完整元数据。
 """
 from __future__ import annotations
 
@@ -40,7 +41,7 @@ CONTAINER_NS = "http://ns.google.com/photos/1.0/container/"
 ITEM_NS = "http://ns.google.com/photos/1.0/container/item/"
 
 DEFAULT_OFFSET = 1.0 / 64.0
-SOFTWARE = "hdr-gainmap 1.3.0"
+SOFTWARE = "hdr-gainmap 0.1.0b1"
 
 # MPF 段总长：marker(2)+length(2)+签名(4)+TIFF(4 字节序 + 4 IFD 偏移 + 42 IFD + 32 条目) = 90
 _MPF_SEG_LEN = 90
@@ -116,8 +117,8 @@ def _xmp_primary(gain_len: int, gmax: float, offset: float) -> str:
     """主图 XMP：GContainer 目录 + hdrgm 参数（元素写法，与 v1.0 一致）。
 
     参数以子元素形式给出（<hdrgm:GainMapMax>…</hdrgm:GainMapMax>），而不是
-    rdf:Description 的属性——旧版用元素写法时荣耀/安卓 16 显示正常，改成属性
-    写法后高光出现黑斑，故这里保持元素写法。
+    rdf:Description 的属性：元素写法在荣耀/Android 16 上显示正常，改成属性写法后
+    高光出现黑斑，故这里保持元素写法。
     """
     g = _fmt(gmax)
     off = _fmt(offset)

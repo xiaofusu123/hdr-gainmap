@@ -1,7 +1,8 @@
-"""16bit PQ 的 HDR PNG（IHDR 16bit RGB + cICP 标记 + pHYs）。
+"""16bit PQ/HLG 的 HDR PNG（IHDR 16bit RGB + cICP 标记 + pHYs）。
 
 PNG 规范只允许 8/16bit，没有 10bit；16bit PQ 是超集，能承载同样的精度。
-cICP(9,16,0,1) = BT.2020 原色 / PQ 传递 / RGB / 全范围，Chrome/Edge/Win11 认这个。
+cICP(9,16,0,1) = BT.2020 原色 / PQ 传递 / RGB / 全范围；HLG 时传递值写 18。
+Chrome/Edge/Win11 认这个标记，缺了会按 sRGB 显示。
 """
 from __future__ import annotations
 
@@ -47,20 +48,22 @@ def _filter(raw: bytes, w: int, h: int) -> bytes:
             (3, (cur - ((left.astype(np.int16) + prev.astype(np.int16)) >> 1).astype(np.uint8)).astype(np.uint8)),
             (4, (cur - _paeth(left, prev, upleft)).astype(np.uint8)),
         ]
-        kind, data = min(cands, key=lambda c: np.abs(c[1].astype(np.int8).astype(np.int32)).sum())
+        kind, data = min(cands, key=lambda c: np.abs(c[1].view(np.int8)).sum())
         out.append(kind)
         out += data.tobytes()
         prev = cur
     return zlib.compress(bytes(out), 9)
 
 
-def encode(q16: np.ndarray, dpi: float = 240.0, software: str = "hdr-gainmap") -> bytes:
-    """q16: (h,w,3) uint16 的 PQ 码值 → PNG 字节。"""
+def encode(q16: np.ndarray, dpi: float = 240.0, software: str = "hdr-gainmap",
+           transfer: str = "PQ") -> bytes:
+    """q16: (h,w,3) uint16 的 PQ/HLG 码值 → PNG 字节（cICP 传递值 16/18）。"""
     h, w, _ = q16.shape
     ppm = int(round(dpi / 0.0254))                       # 每米像素数
+    trc = 18 if transfer.upper() == "HLG" else 16
     head = (b"\x89PNG\r\n\x1a\n"
             + _chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 16, 2, 0, 0, 0))
-            + _chunk(b"cICP", bytes([9, 16, 0, 1]))
+            + _chunk(b"cICP", bytes([9, trc, 0, 1]))
             + _chunk(b"tEXt", b"Software\x00" + software.encode("ascii"))
             + _chunk(b"pHYs", struct.pack(">IIB", ppm, ppm, 1)))
     body = _chunk(b"IDAT", _filter(q16.astype(">u2").tobytes(), w, h))
