@@ -9,7 +9,7 @@ description: hdr-gainmap 不靠 AI 提亮，而是用光照场、扩散、环境
 
 **把 8bit SDR 插画转成 HDR 母版**：一条命令输出 Ultra HDR JPEG、16bit PNG、10/12bit HEIC 与 12bit AVIF，不设档位，增益参数按每张图自己的光影分布计算。
 
-**版本：Beta 0.1.0**（首个公开测试版）。
+**版本：Beta 0.1.1**。
 
 ## 示例
 
@@ -37,17 +37,17 @@ SDR 像素按 sRGB EOTF 还原成线性光 `L_sdr`，乘同一个标量增益 `g
 
 * **PQ 是绝对亮度**：`L_hdr` 以 SDR 白 = 203 nits 为基准换算成 cd/m² 再编码。203 nits 在 PQ 码值上约 0.58，所以把 PQ 文件直接塞进 SDR 查看器会发灰——不是文件坏了，而是缺少 HDR 渲染链路。
 * **HLG 是相对信号**：SDR 白落在约 75%，显示端按自己的峰值做 OOTF（本工具按 1000 nits 峰值编码）。兼容 SDR 的 HLG 显示器能直接出图，代价是峰值不如 PQ 可控。
-* **Ultra HDR 不存第二张 HDR 图**：它是一张 8bit SDR 主图 + 一张 8bit 增益图。增益图在 log2 域归一化到 `[0, GainMapMax]`（这里 `GainMapMax ≈ 1.45` EV），解码端按显示器 headroom 插值后乘回 SDR。旧查看器只看主图，新设备读增益图得到 HDR。
+* **Ultra HDR 不存第二张 HDR 图**：它是一张 8bit SDR 主图 + 一张 8bit 增益图。增益图在 log2 域归一化到 `[0, GainMapMax]`（本项目上限 1.45 EV），解码端按显示器 headroom 插值后乘回 SDR。输出遵循 Ultra HDR 1.1：XMP `hdrgm` 与 ISO 21496-1 同时写入；1.1 向下兼容 1.0。
 
 ## 五种产物
 
-| 格式       | 色深 / 编码                                            | 典型用途                              |
-| -------- | -------------------------------------------------- | --------------------------------- |
-| `jpeg`   | 8bit sRGB 主图 + 8bit 增益图，MPF + XMP `hdrgm`          | 安卓原生 HDR，后缀 `.jpeg`               |
-| `png`    | 16bit RGB + PQ 或 HLG（`cICP 9/16/0/1` 或 `9/18/0/1`） | 无损母版、后期交换                         |
-| `heic10` | 10bit HEVC Main10（`nclx 9/16/9`）                   | 兼容性最好（Windows / macOS / iOS / 安卓） |
-| `heic12` | 12bit HEVC Main12（`nclx 9/16/9`）                   | 色深最高，需解码端支持                       |
-| `avif`   | 12bit AV1 4:4:4（优先；`nclx 9/16/9`）                  | 体积小，网页 / 分享                       |
+| 格式       | 色深 / 编码                                                 | 典型用途                              |
+| -------- | ------------------------------------------------------- | --------------------------------- |
+| `jpeg`   | 8bit sRGB 主图 + 8bit 增益图，MPF + XMP `hdrgm` + ISO 21496-1 | Ultra HDR 1.1，后缀 `.jpeg`          |
+| `png`    | 16bit RGB + PQ 或 HLG（`cICP 9/16/0/1` 或 `9/18/0/1`）      | 无损母版、后期交换                         |
+| `heic10` | 10bit HEVC Main10（`nclx 9/16/9`）                        | 兼容性最好（Windows / macOS / iOS / 安卓） |
+| `heic12` | 12bit HEVC Main12（`nclx 9/16/9`）                        | 色深最高，需解码端支持                       |
+| `avif`   | 12bit AV1 4:4:4（优先；`nclx 9/16/9`）                       | 体积小，网页 / 分享                       |
 
 同一张图的五种产物共用**同一条增益曲线**，区别只在容器、色深与编码。Ultra HDR 的增益图默认半分辨率（可 `--gain-fullres` 改全分辨率），其余格式都是逐像素 16bit 中间量编码。
 
@@ -204,7 +204,6 @@ python -m hdrgainmap photo.png -o out --json --validate
 | `--dpi`          | 输出 DPI，默认沿用源图                                           |
 | `--transfer`     | 传递函数 `PQ`（默认）/ `HLG`                                    |
 | `--alpha-bg`     | 透明图合成底色 `black`（默认）/ `white`                            |
-| `--write-iso`    | Ultra HDR 同时写 ISO 21496-1 APP2（默认只写 XMP）                |
 | `--gain-fullres` | 增益图保持全分辨率（默认半分辨率）                                       |
 | `--validate`     | 生成后逐个产物跑合规校验，失败时退出码 1                                   |
 | `--debug`        | 额外落盘 `_emis.png`、`_gainmap.png`、`_gainmap_embedded.png` |
@@ -212,7 +211,7 @@ python -m hdrgainmap photo.png -o out --json --validate
 | `--json`         | JSON 输出（路径 + 统计 + 校验报告）                                 |
 | `--version`      | 打印版本                                                    |
 
-参数作用范围：`-q` 只影响 JPEG/HEIC/AVIF，PNG 始终无损；`--transfer` 影响 PNG/HEIC/AVIF，Ultra HDR 的 SDR 主图不变；`--dpi` 写入所有产物的元数据；`--gain-fullres` 只影响 Ultra HDR 增益图；`--write-iso` 只影响 Ultra HDR 元数据；`--alpha-bg` 只对带 alpha 的源生效。
+参数作用范围：`-q` 只影响 JPEG/HEIC/AVIF，PNG 始终无损；`--transfer` 影响 PNG/HEIC/AVIF，Ultra HDR 的 SDR 主图不变；`--dpi` 写入所有产物的元数据；`--gain-fullres` 只影响 Ultra HDR 增益图；`--alpha-bg` 只对带 alpha 的源生效。
 
 单张图失败不会中断批量：每个文件独立处理，最后统一以退出码表示是否有失败。
 
@@ -289,13 +288,43 @@ avif.encode(q16, transfer="PQ", bits=12, quality=100, dpi=240)   # → (blob, bi
 * **AVIF** 的 ffmpeg muxer 不写色彩标签（一律 2/2），编码后改写 `nclx` 7 字节；DPI 通过补一个 Exif item（`iloc` / `iinf` / `iref` + `mdat` 尾部 TIFF，`infe` 必须 version 2）写入。
 * **DPI**：PNG 写 `pHYs`；HEIC 借 EXIF 282/283/296；AVIF 补 Exif item。Explorer 面板才会显示 240 dpi 而不是 72。
 
-### Ultra HDR 的元数据
+### Ultra HDR：一张 JPEG，两幅画面
 
-Ultra HDR JPEG 由「SDR 主图 + 增益图」两张 JPEG 通过 MPF 关联，XMP 里写 `hdrgm` 参数（`GainMapMin/Max`、`Gamma`、`OffsetSDR/HDR`、`HDRCapacityMin/Max`、`BaseRenditionIsHDR`）。主图的 XMP 还带 `GContainer` 目录与增益图字节长度。
+Ultra HDR 不是把 HDR 样本直接塞进 JPEG，而是**一张 SDR 主图 + 一张 8bit 增益图**。两张 JPEG 通过 **MPF**（Multi-Picture Format）关联；主图本身是完整 SDR 图像，增益图在 log2 域记录每个像素相对主图的光比，解码端按屏幕 headroom 插值后把主图乘亮。
 
-> 默认**不写** ISO 21496-1 APP2。实测部分安卓 16 的 HDR 解码路径会优先读 ISO，并把本工具写的 61 字节解释错，导致白色区域变黑；只留 XMP `hdrgm` 时同一文件显示正常。需要 ISO 元数据的场合可传 `write_iso=True`，生成后务必在目标机验证。
+本项目固定输出 Ultra HDR 1.1：XMP `hdrgm` 与 ISO 21496-1 同时写入。1.1 向下兼容 1.0，因此不再提供 XMP-only 模式。
 
-这里的 `hdrgm` 用**元素**形式（`<hdrgm:GainMapMax>…`）而不是属性形式，是刻意选择：属性形式在部分 Honor / 安卓 16 设备上会让高光变黑。
+本项目的增益图约定：
+
+* 8bit 灰度 JPEG，默认半分辨率（`--gain-fullres` 改全分辨率）；
+* 像素值 = `log2(gain)` 归一化到 `[0, GainMapMax]` 后乘 255 量化；
+* 量化前加 ±0.5 LSB 三角抖动；半分辨率时先在 log2 域按全分辨率取码，再 LANCZOS 缩小，最后抖动——顺序反了会把噪点抹平；
+* `GainMapMin = 0`，`GainMapMax = log2(max(gain))`，`Gamma = 1`，`OffsetSDR = OffsetHDR = 1/64`（0.015625），`BaseRenditionIsHDR = False`。
+
+#### 容器与元数据
+
+主图和增益图各自是完整 JPEG。主图按 **ICC → EXIF → ISO 21496-1 → MPF → XMP** 排列，增益图里是 **XMP → ISO 21496-1**；MPF 的 TIFF 目录有两条记录，主图属性 `0x00030000`，增益图属性 `0`，偏移量相对 MPF TIFF 头计算。主图 XMP 同时带 `hdrgm` 参数和 `GContainer` 目录（`Primary`、`GainMap` 以及增益图字节长度）。
+
+`hdrgm` 使用**元素**形式（`<hdrgm:GainMapMax>1.089…</hdrgm:GainMapMax>`），不用属性形式：属性形式在部分 Honor / Android 16 设备上会让高光变黑。
+
+#### 两套元数据：XMP 与 ISO 21496-1
+
+* **XMP `hdrgm`**：Ultra HDR 1.1 的原始载体，字段是十进制定点，8 位小数。
+* **ISO 21496-1 APP2**：2025 年标准化的通用增益图元数据。主图只放 4 字节版本存根（`min_version` / `writer_version` 均为 0），增益图放完整 61 字节：`flags`（`0x40` = 单通道 + 使用基础色彩空间）、base/alternate headroom、每通道 5 个有理数（gain min/max、gamma、base offset、alternate offset）。**全部大端**，分母 `1e8`，因此能和 XMP 的 8 位小数逐位对齐。
+* 两套元数据始终同时写入，值必须一致；`validate` 会交叉核对 `GainMapMax`、`GainMapMin`、`OffsetSDR` 与 ISO 字段。
+
+> ISO 按规范必须大端：`0.89387586` 的小端写法会被读成约 `75`，高光因此变黑。早期版本有过这个小端 bug，现已修复，并有逐字节对照参考样本的回归测试。
+
+#### 解码
+
+忽略屏幕 headroom 时，最简公式是：
+
+```text
+gain = 2 ** (pixel / 255 * GainMapMax)
+HDR  = (SDR + OffsetSDR) * gain - OffsetHDR
+```
+
+其中 `pixel` 是增益图的 8bit 值，`SDR` 是主图线性化到 `0..1` 后的值。支持 headroom 的解码器会先按 `log2(max_display_boost)` 在 `[HDRCapacityMin, HDRCapacityMax]` 之间插值出实际 `log2_gain` 再乘，所以同一张图在 400 nits 和 1000 nits 屏幕上亮度不同。
 
 ## 质量与性能
 
@@ -305,12 +334,12 @@ Ultra HDR JPEG 由「SDR 主图 + 增益图」两张 JPEG 通过 MPF 关联，XM
 * HEIC / AVIF 质量 100（AVIF 的 AV1 `crf = (100-q)*0.63`，100 → crf 0）；
 * AVIF 优先 4:4:4，插画色边锐利，4:2:0 会把彩色高光糊掉；若 12bit 4:4:4 失败会自动降级（4:2:0 或 10bit）；
 * PNG 无损，zlib level 9；
-* 增益图默认半分辨率：在 log2 域按全分辨率取码，再用 LANCZOS 缩小，抖动在缩放后生成；`--gain-fullres` 保持全分辨率（70.2MP 实测增益图 9.91MB）。
+* 增益图默认半分辨率：在 log2 域按全分辨率取码，再用 LANCZOS 缩小，抖动在缩放后生成；`--gain-fullres` 保持全分辨率（70.2MP 实测内嵌增益图 JPEG 9.91MB）。
 
 性能（6 核 CPU，17.8MP / 5800×3066 参考）：
 
 * 只出 Ultra HDR JPEG 约 45s，其中增益计算约 37s；
-* 70.2MP（12960×5420）出全五种格式约 7.5 分钟：gain 181s、PNG 111s、AVIF 89s、HEIC 18s；全分辨率增益图比半分辨率多约 19% 的 Ultra HDR 体积；
+* 70.2MP（12960×5420）出全五种格式约 7.5 分钟：gain 181s、PNG 111s、AVIF 89s、HEIC 18s；全分辨率增益图让 Ultra HDR 体积增加约两成；
 * PNG 是耗时大头，17.8MP 约 23s；
 * HDR 中间量按 `tile_rows=2048` 分块编码，避免整幅 `float32` 同时驻留；
 * 各产物原子写入（临时文件 + `os.replace`），中途失败不会留下半截文件。
@@ -326,16 +355,16 @@ python -m hdrgainmap.validate out/x_hdr16_pq.png out/x_hdr10_pq.heic out/x_hdr12
 * **PNG**：IHDR 16bit RGB、`cICP` 9/16 或 9/18、pHYs、zlib 长度与滤波字节范围、能否解码；
 * **HEIC**：位深 10/12、`nclx` primaries=9、transfer 16/18、**matrix=9**、码值是否触顶；
 * **AVIF**：major brand、`nclx`（primaries=9、transfer 16/18、matrix=9）、`pixi` 位深、能否解码；
-* **Ultra HDR**：MPF 两条、`hdrgm` 参数、增益图可解码；若存在 ISO 21496-1 元数据则逐字段核对。
+* **Ultra HDR**：MPF 两条、`hdrgm` 参数、增益图可解码；ISO 21496-1 逐字段核对（主图存根、增益图完整载荷、与 XMP 交叉一致）。
 
 ## 测试
 
 ```bash
-python -m pytest              # 16 个测试
+python -m pytest              # 18 个测试
 python tests/test_roundtrip.py  # 也可以直接跑脚本
 ```
 
-覆盖：PQ 编解码互逆、自适应参数随图变化、五种格式全量构建、PNG 两条解码路径逐像素一致、HLG 的 `cICP`、质量参数影响体积、EXIF 方向、alpha 合成、ICC→sRGB、分块 HDR 编码一致性、大面积白墙降权、原子写入、JPEG 主图复用、API 参数校验、调试增益图输出。
+覆盖：PQ 编解码互逆、自适应参数随图变化、五种格式全量构建、PNG 两条解码路径逐像素一致、HLG 的 `cICP`、质量参数影响体积、EXIF 方向、alpha 合成、ICC→sRGB、分块 HDR 编码一致性、大面积白墙降权、原子写入、JPEG 主图复用、API 参数校验、调试增益图输出、ISO 21496-1 大端布局与可读性。
 
 ## 已知限制
 
@@ -344,7 +373,6 @@ python tests/test_roundtrip.py  # 也可以直接跑脚本
 * **PQ 直传在 SDR 环境下必然发灰**：SDR 白（203 nits）只占码值约 0.58，没有 HDR 渲染链路时它就是灰的。
 * **HEIF 无 DPI 字段**：只能借 EXIF，WIC 认、第三方 App 未必认。
 * **HEIC/AVIF 的 SDR 回退取决于查看器**：文件里只有一张 HDR 图，没有独立 SDR 基图；部分安卓 16 设备会把 PQ 码值整体抬高，此时 SDR 观感会过曝，而 HDR 显示正常。这是设备映射问题，未在编码端做“中间调压暗”补偿。
-* **Ultra HDR 默认不写 ISO 21496-1**：原因见上；需要时用 `--write-iso`，并在目标机验证。
 * **启发式模型有边界**：超大面积的平亮表面可能被压得偏暗；极暗图上的噪点可能被当成细碎高光；它不追求物理正确的光传输。
 * **AVIF 是普通 HDR AVIF**，不是带增益图的 tmap 封装；SDR 回退同样交给查看器。
 * **无 GPU 加速**：增益场与模糊都在 CPU 上用 NumPy 完成。

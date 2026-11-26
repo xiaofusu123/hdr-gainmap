@@ -11,7 +11,7 @@
   pipeline  一条龙构建
   cli       命令行入口
 """
-__version__ = "0.1.0b1"
+__version__ = "0.1.1b1"
 
 from . import avif, color, gainmap, heic10, png16, ultrahdr  # noqa: F401
 from .pipeline import FORMATS, QUALITY, build               # noqa: F401

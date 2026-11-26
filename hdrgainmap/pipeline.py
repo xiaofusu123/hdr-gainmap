@@ -141,14 +141,15 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
           lift: float | None = None, peak_scale: float | None = None,
           embed_icc: bool = True, gain_fullres: bool = False,
           gain_rgb: bool = False, gain_scale: float = 1.0,
-          iso_flags: int = 0x40, write_iso: bool = False,
+          iso_flags: int = 0x40,
           invert_gain: bool = False, alpha_bg: tuple[int, int, int] = (0, 0, 0),
           tile_rows: int = 2048, log=None) -> dict:
     """按格式生成 HDR 母版，返回产物路径与统计。
 
     lift / peak_scale 用于试调：只覆盖其中一个时，就是"只整体抬"或"只压峰值"。
     alpha_bg 是透明图合成时的底色；log 是可选的进度回调（接收一行文本）。
-    单个格式失败不会中断其它格式，错误收在 result["errors"] 里。
+    Ultra HDR 按 1.1 同时写 XMP 与 ISO 21496-1；单个格式失败不会中断其它格式，
+    错误收在 result["errors"] 里。
     """
     t_start = time.perf_counter()
     timings: dict[str, float] = {}
@@ -284,7 +285,7 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
             result["gmax_meta"] = gmax_meta
             blob = ultrahdr.build(base_jpeg, gm_buf.getvalue(), gmax=gmax_meta,
                                   dpi=dpi, icc=_srgb_icc() if embed_icc else None,
-                                  iso_flags=iso_flags, write_iso=write_iso)
+                                  iso_flags=iso_flags)
             path = outdir / f"{stem}_ultrahdr.jpeg"
             _write_atomic(path, blob)
             result["files"]["jpeg"] = str(path)

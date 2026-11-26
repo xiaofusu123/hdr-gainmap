@@ -14,6 +14,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hdrgainmap import gainmap                       # noqa: E402
+from hdrgainmap import ultrahdr, validate            # noqa: E402
 from hdrgainmap.pipeline import _hdr_code, _write_atomic, build  # noqa: E402
 
 
@@ -157,3 +158,47 @@ def test_debug_outputs_gainmaps(tmp_path: Path) -> None:
     assert emis.size == (size, size)
     assert embedded.size == (size // 2, size // 2)
     assert np.asarray(gain).max() > 0
+
+
+def test_iso_payload_spec_layout() -> None:
+    """ISO 21496-1 载荷必须是大端；字节与参考实现逐位一致。"""
+    payload = ultrahdr._iso_metadata(0.89387586, 0.015625)
+    expected = bytes.fromhex(
+        "0000000040" "0000000005f5e100" "0553f24205f5e100"
+        "0000000005f5e100" "0553f24205f5e100" "0000000100000001"
+        "0017d78405f5e100" "0017d78405f5e100")
+    assert payload == expected
+
+    parsed = validate.parse_iso(ultrahdr.ISO_NS + payload)
+    assert parsed is not None
+    assert parsed["alt_headroom"] == pytest.approx(0.89387586)
+    assert parsed["min0"] == pytest.approx(0.0)
+    assert parsed["max0"] == pytest.approx(0.89387586)
+    assert parsed["gamma0"] == pytest.approx(1.0)
+    assert parsed["base_offset0"] == pytest.approx(0.015625)
+
+
+def test_build_writes_iso_by_default(tmp_path: Path) -> None:
+    """Ultra HDR 1.1 默认同时写 XMP 与 ISO；主图存根、增益图完整段。"""
+    src = tmp_path / "light.png"
+    img = np.full((64, 64, 3), 20, np.uint8)
+    img[20:44, 20:44] = 240
+    Image.fromarray(img, "RGB").save(src)
+
+    res = build(src, tmp_path / "out", formats=("jpeg",))
+    assert res["ok"]
+    path = tmp_path / "out" / "light_ultrahdr.jpeg"
+    blob = path.read_bytes()
+    info = ultrahdr.parse(blob)
+
+    primary_iso = info["iso_primary"]
+    assert primary_iso is not None
+    assert primary_iso[len(ultrahdr.ISO_NS):] == b"\x00\x00\x00\x00"   # 版本存根
+
+    gain_iso = validate.parse_iso(info["iso_gainmap"])
+    assert gain_iso is not None and not gain_iso["stub"]
+    assert gain_iso["alt_headroom"] == pytest.approx(info["gmax"])
+    assert gain_iso["max0"] == pytest.approx(info["gmax"])
+
+    rep = validate.validate_file(path)
+    assert rep.ok, rep.errors

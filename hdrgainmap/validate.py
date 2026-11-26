@@ -309,7 +309,7 @@ def parse_iso(payload: bytes) -> dict | None:
             nonlocal p
             if p + 4 > len(body):
                 return
-            n = struct.unpack_from("<i" if signed else "<I", body, p)[0]
+            n = struct.unpack_from(">i" if signed else ">I", body, p)[0]
             p += 4
             out[name] = n / common if common else float("nan")
 
@@ -326,7 +326,7 @@ def parse_iso(payload: bytes) -> dict | None:
             nonlocal p
             if p + 8 > len(body):
                 return
-            n, d = struct.unpack_from("<iI", body, p)
+            n, d = struct.unpack_from(">iI", body, p)
             p += 8
             out[name] = n / d if d else float("nan")
         pair("base_headroom")
@@ -534,7 +534,7 @@ def validate_ultrahdr(blob: bytes, path: str = "", deep: bool = True) -> Report:
         elif prime_iso["min_version"] != 0:
             rep.err(f"主图 ISO min_version={prime_iso['min_version']}（应为 0）")
     else:
-        rep.info["iso_primary"] = "无（按 XMP hdrgm 输出；安卓 16 读 ISO 时白色区域会变黑，默认不写）"
+        rep.info["iso_primary"] = "无（Ultra HDR 1.0 旧文件，或非本工具产物）"
 
     # 增益图的 ISO 完整元数据
     iso = None
@@ -564,13 +564,24 @@ def validate_ultrahdr(blob: bytes, path: str = "", deep: bool = True) -> Report:
             if gain_xmp.get("GainMapMax"):
                 try:
                     xmax = float(gain_xmp["GainMapMax"])
-                    if abs(iso.get("alt_headroom", xmax) - xmax) > 1e-2:
-                        rep.warn(f"ISO alt_headroom={iso.get('alt_headroom'):.4f} 与 "
-                                 f"XMP GainMapMax={xmax:.4f} 不一致")
+                    xmin = float(gain_xmp.get("GainMapMin", "0"))
+                    xsdr = float(gain_xmp.get("OffsetSDR", "0.015625"))
+                    if abs(iso.get("alt_headroom", xmax) - xmax) > 1e-6:
+                        rep.warn(f"ISO alt_headroom={iso.get('alt_headroom'):.8f} 与 "
+                                 f"XMP GainMapMax={xmax:.8f} 不一致")
+                    if abs(iso.get("max0", xmax) - xmax) > 1e-6:
+                        rep.warn(f"ISO gain_map_max={iso.get('max0'):.8f} 与 "
+                                 f"XMP GainMapMax={xmax:.8f} 不一致")
+                    if abs(iso.get("min0", xmin) - xmin) > 1e-6:
+                        rep.warn(f"ISO gain_map_min={iso.get('min0'):.8f} 与 "
+                                 f"XMP GainMapMin={xmin:.8f} 不一致")
+                    if abs(iso.get("base_offset0", xsdr) - xsdr) > 1e-6:
+                        rep.warn(f"ISO base_offset={iso.get('base_offset0'):.8f} 与 "
+                                 f"XMP OffsetSDR={xsdr:.8f} 不一致")
                 except ValueError:
                     pass
     else:
-        rep.info["iso_gain"] = "无（解码端回退读 XMP hdrgm，当前默认路径）"
+        rep.info["iso_gain"] = "无（解码端回退读 XMP hdrgm；默认路径）"
 
     rep.info.update(info)
     return rep

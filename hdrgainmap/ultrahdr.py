@@ -5,12 +5,12 @@
     SOI
     APP0 JFIF            ← 源图若有则原样保留在最前
     APP1 Exif            ← 只写 Software / ImageDescription
+    APP2 ISO (主图)      ← 命名空间 + 两个 u16 版本号（4 字节存根，大端）
     APP2 MPF             ← 两条 16 字节条目，定位增益图
     APP1 XMP (主图)      ← GContainer 目录 + hdrgm:Version
-    APP2 ISO (主图)      ← 命名空间 + 两个 u16 版本号（4 字节存根）
     <主图其余段 + 熵编码 + EOI>
     SOI + APP1 XMP (增益图)  ← 完整 hdrgm 参数
-        + APP2 ISO (增益图)  ← 61 字节完整元数据（单通道）
+        + APP2 ISO (增益图)  ← 61 字节完整元数据（单通道，大端）
         + 增益图熵编码 + EOI
 
 三条硬约束（对应 libultrahdr `hasValidMpfAssociation()`）：
@@ -41,7 +41,7 @@ CONTAINER_NS = "http://ns.google.com/photos/1.0/container/"
 ITEM_NS = "http://ns.google.com/photos/1.0/container/item/"
 
 DEFAULT_OFFSET = 1.0 / 64.0
-SOFTWARE = "hdr-gainmap 0.1.0b1"
+SOFTWARE = "hdr-gainmap 0.1.1b1"
 
 # MPF 段总长：marker(2)+length(2)+签名(4)+TIFF(4 字节序 + 4 IFD 偏移 + 42 IFD + 32 条目) = 90
 _MPF_SEG_LEN = 90
@@ -170,24 +170,34 @@ def _hdrgm_elements(g: str, off: str) -> str:
 # --------------------------------------------------------------------------- ISO
 
 
-def _frac(v: float, denom: int = 1_000_000) -> bytes:
-    """有符号分数（u32 分子 + u32 分母）；ISO 元数据里的 N/D 对。"""
-    return struct.pack("<iI", int(round(float(v) * denom)), denom)
+def _frac(v: float, denom: int = 100_000_000) -> bytes:
+    """有符号分数（s32 分子 + u32 分母，大端）；ISO 元数据里的 N/D 对。
+
+    ISO 21496-1 的 APP2 载荷按网络字节序（大端）存放；早期版本误用小端，
+    解码端会把 0.89387586 读成 75 左右，表现就是高光区域发黑。
+    """
+    return struct.pack(">iI", int(round(float(v) * denom)), denom)
 
 
-def _frac_u(v: float, denom: int = 1_000_000) -> bytes:
-    return struct.pack("<II", int(round(float(v) * denom)), denom)
+def _frac_u(v: float, denom: int = 100_000_000) -> bytes:
+    """无符号分数（u32 分子 + u32 分母，大端）。"""
+    return struct.pack(">II", int(round(float(v) * denom)), denom)
 
 
 def _iso_metadata(gmax: float, offset: float, base_headroom: float = 0.0,
                   flags: int = 0x40) -> bytes:
-    """61 字节单通道 ISO 21496-1 元数据（min/writer 版本 0）。"""
-    out = struct.pack("<HHB", 0, 0, flags)
-    out += _frac_u(base_headroom, 1)               # base headroom = 0/1
-    out += _frac(gmax, 1_000_000)                  # alternate headroom = GainMapMax
+    """61 字节单通道 ISO 21496-1 元数据（大端，min/writer 版本 0）。
+
+    所有值都在 log2 域：headroom 与 gain map min/max 直接写 XMP 的
+    ``HDRCapacity*`` / ``GainMap*`` 数值，不要先取 2 的幂。
+    分母统一用 1e8，与 XMP 的 8 位小数逐位对齐（差值 0）。
+    """
+    out = struct.pack(">HHB", 0, 0, flags)
+    out += _frac_u(base_headroom)                  # base headroom = 0/1e8
+    out += _frac_u(gmax)                           # alternate headroom = GainMapMax
     out += _frac(0.0)                              # gain map min
     out += _frac(gmax)                             # gain map max
-    out += struct.pack("<II", 1, 1)                # gamma = 1/1
+    out += struct.pack(">II", 1, 1)                # gamma = 1/1
     out += _frac(offset)                           # base offset
     out += _frac(offset)                           # alternate offset
     assert len(out) == 61, len(out)
@@ -267,13 +277,15 @@ def strip_metadata(jpeg: bytes) -> bytes:
 
 def build(primary: bytes, gain_jpeg: bytes, gmax: float = 2.0,
           offset: float = DEFAULT_OFFSET, software: str = SOFTWARE,
-          iso_flags: int = 0x40, write_iso: bool = True,
+          iso_flags: int = 0x40,
           description: str | None = None, dpi: float | None = None,
           icc: bytes | None = None) -> bytes:
-    """把 SDR 主图与增益图 JPEG 封装成 Ultra HDR JPEG。
+    """把 SDR 主图与增益图 JPEG 封装成 Ultra HDR 1.1 JPEG。
 
     ``primary`` 是完整的 8bit JPEG（SOI 开头）；会先剥掉旧的 Exif/XMP/MPF/ISO 再封装，
     其余字节（DQT/SOF/DHT/SOS + 熵数据）原样保留——源图本身是 JPEG 时即零重编码。
+    按 Ultra HDR 1.1 同时写 XMP ``hdrgm`` 与 ISO 21496-1：主图放 4 字节版本存根，
+    增益图放完整元数据。1.1 向下兼容 1.0，因此不再提供 XMP-only 模式。
     """
     if not primary.startswith(b"\xff\xd8"):
         raise ValueError("主图必须是 JPEG")
@@ -292,9 +304,9 @@ def build(primary: bytes, gain_jpeg: bytes, gmax: float = 2.0,
     if icc and not _find(primary, 0xE2, ICC_ID):    # 主图本来没有 ICC 才补（规范要求标色）
         icc_seg = _seg(0xE2, ICC_ID + b"\x01\x01" + icc)
     exif = _seg(0xE1, _exif(software, description, dpi))
-    iso_stub = _seg(0xE2, ISO_NS + struct.pack("<HH", 0, 0)) if write_iso else b""
+    iso_stub = _seg(0xE2, ISO_NS + struct.pack(">HH", 0, 0))
     gain_head = (_seg(0xE1, XMP_NS + _xmp_gainmap(gmax, offset).encode("utf-8"))
-                 + (_seg(0xE2, ISO_NS + _iso_metadata(gmax, offset, flags=iso_flags)) if write_iso else b""))
+                 + _seg(0xE2, ISO_NS + _iso_metadata(gmax, offset, flags=iso_flags)))
     gain_body = gain[2:]
     gain_total = 2 + len(gain_head) + len(gain_body)
 
@@ -305,13 +317,15 @@ def build(primary: bytes, gain_jpeg: bytes, gmax: float = 2.0,
         xmp_primary = _seg(0xE1, XMP_NS + _xmp_primary(gain_total, gmax, offset).encode("utf-8"))
         head_len = len(icc_seg) + len(exif) + _MPF_SEG_LEN + len(xmp_primary) + len(iso_stub)
         primary_len = len(jfif) + head_len + len(rest)
-        tiff_abs = len(jfif) + len(icc_seg) + len(exif) + 8   # MPF 段起点（含 SOI）+ 段头
+        # MPF 的 TIFF 头紧跟 ICC / EXIF / ISO 之后，偏移必须把 ISO 段算进去。
+        tiff_abs = len(jfif) + len(icc_seg) + len(exif) + len(iso_stub) + 8
         gain_rel = primary_len - tiff_abs
         mpf = _seg(0xE2, _mpf(primary_len, gain_total, gain_rel))
         if len(mpf) != _MPF_SEG_LEN:                  # 防御：长度只取决于定长字段
             raise AssertionError("MPF 长度异常")
 
-    return (jfif + icc_seg + exif + mpf + xmp_primary + iso_stub + rest
+    # 主图顺序与 libultrahdr 产物一致：ICC → EXIF → ISO → MPF → XMP → 图像数据。
+    return (jfif + icc_seg + exif + iso_stub + mpf + xmp_primary + rest
             + b"\xff\xd8" + gain_head + gain_body)
 
 

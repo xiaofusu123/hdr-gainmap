@@ -38,8 +38,6 @@ def _parser() -> argparse.ArgumentParser:
                    help="传递函数（默认 PQ）")
     p.add_argument("--alpha-bg", default="black", choices=["black", "white"],
                    help="透明图合成底色（默认 black）")
-    p.add_argument("--write-iso", action="store_true",
-                   help="Ultra HDR 同时写 ISO 21496-1 APP2（默认只写 XMP）")
     p.add_argument("--gain-fullres", action="store_true",
                    help="增益图保持全分辨率（默认半分辨率）")
     p.add_argument("--validate", action="store_true",
@@ -57,7 +55,7 @@ def _run_one(args, src: str, alpha_bg: tuple[int, int, int], log) -> dict:
     formats = tuple(s.strip().lower() for s in args.formats.split(",") if s.strip())
     res = build(src, args.outdir, formats=formats, quality=args.quality,
                 dpi=args.dpi, transfer=args.transfer, debug=args.debug,
-                alpha_bg=alpha_bg, write_iso=args.write_iso,
+                alpha_bg=alpha_bg,
                 gain_fullres=args.gain_fullres, log=log)
     if args.validate:
         from . import validate
