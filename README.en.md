@@ -17,7 +17,7 @@ Source `1777789210281_x4_animejanai.png` (originally 12960×5420, 8-bit SDR; sho
 
 ![Source illustration](docs/images/sample-source.jpg)
 
-Left: SDR source; right: an approximate SDR-screen preview of the HDR master (`gainmap.render_preview`). The preview shows *where* the lift happens, not real luminance on an HDR display:
+Top: SDR source; bottom: an approximate SDR-screen preview of the HDR master (`gainmap.render_preview`). Each row keeps the full width instead of squeezing two panels side by side. The preview shows *where* the lift happens, not real luminance on an HDR display:
 
 ![SDR source and HDR preview](docs/images/sample-compare.jpg)
 
@@ -157,7 +157,7 @@ pip install -e .
 pip install -r requirements.txt
 ```
 
-Requires `numpy`, `pillow`, `pillow-heif`; AVIF needs `ffmpeg` with libaom-av1. 24-bit JXL needs `cjxl` 0.13+ (libjxl) on `PATH`, or `HDRGAINMAP_CJXL` / `HDRGAINMAP_JXLINFO`. Missing cjxl fails only the `jxl` entry. Python 3.10+.
+Requires `numpy`, `pillow`, `pillow-heif`; GPU acceleration needs `wgpu` (`pip install -e .[gpu]`) and otherwise falls back to the CPU; AVIF needs `ffmpeg` with libaom-av1. 24-bit JXL needs `cjxl` 0.13+ (libjxl) on `PATH`, or `HDRGAINMAP_CJXL` / `HDRGAINMAP_JXLINFO`. Missing cjxl fails only the `jxl` entry. Python 3.10+.
 
 ## Usage
 
@@ -223,7 +223,7 @@ Files are processed in the order given; one failure does not stop the rest. `--q
 | `--json`        | JSON with paths, stats and validation reports                   |
 | `--version`     | print version                                                   |
 
-Scope: `-q` affects JPEG/HEIC/AVIF only (PNG and JXL are always lossless); `--dpi` is written to every output, JXL included (container `Exif` box); `--alpha-bg` only matters for sources with alpha. `--transfer` and `--gain-fullres` were removed: transfer is always PQ and the gain map is always full-resolution.
+Scope: `-q` affects JPEG/HEIC/AVIF only (PNG and JXL are always lossless); `--dpi` is written to every output, JXL included (container `Exif` box); `--alpha-bg` only matters for sources with alpha. `-j` encodes several formats at once (JXL and AVIF are subprocesses, the PNG filter is parallel by block); `--gpu off` forces the CPU path; `--transfer` and `--gain-fullres` were removed: transfer is always PQ and the gain map is always full-resolution.
 
 The three debug images differ: `_emis.png` is the emission field (intermediate weights, not final gain); `_gainmap.png` is a log2-normalised view of the scalar gain; `_gainmap_embedded.png` is the RGB map actually embedded in the JPEG (with dither).
 
@@ -256,7 +256,7 @@ print(res["stats"]["peak_nits"], res["stats"]["gmax_channels"])
             "gt2x_pct": 1.7, "peak_nits": 486.0, "base_reused": True},
   "timings": {"load": 0.02, "gain": 1.23, "hdr": 0.25, "jxl": 0.79,
               "jpeg": 0.45, "png": 0.76, "heic10": 0.99, "heic12": 0.97,
-              "avif": 1.83, "total": 7.27},
+              "avif": 2.36, "total": 4.37},
   "ok": True,
 }
 ```
@@ -364,7 +364,7 @@ Quality-first defaults:
 
 Measured (6-core CPU):
 
-* **1600×669 example**: 7.27 s end to end, gain 1.23 s; Ultra HDR 0.87 MB, PNG 3.94 MB, HEIC 0.36 MB, AVIF 1.73 MB, JXL 5.73 MB; peak 486 nits; per-channel gmax 1.20 / 1.21 / 1.37;
+* **1600×669 example**: 4.2 s end to end (4-way parallel + GPU; 7.1 s serial on CPU), gain 1.7 s and PQ encoding 0.13 s; Ultra HDR 0.87 MB, PNG 3.94 MB, HEIC 0.36 MB, AVIF 1.73 MB, JXL 5.73 MB; peak 486 nits; per-channel gmax 1.20 / 1.21 / 1.37;
 * **Reconstruction**: gains decoded from the Ultra HDR JPEG versus the PNG master show 1.3% mean relative error, 4.2% p95, peak 489 vs 486 nits;
 * **earlier 70 MP measurements** (order of magnitude only): 17.8 MP Ultra HDR alone ≈ 45 s; 70.2 MP five formats ≈ 7.5 min (gain 181 s, PNG 111 s, AVIF 89 s, HEIC 18 s); 70.2 MP JXL ≈ 232 s / 273 MB with an ≈ 840 MB temporary PFM.
 
@@ -402,7 +402,7 @@ Coverage: PQ round-trip, adaptive parameters, all six formats, 24-bit JXL depth/
 * **Heuristic limits**: very large flat bright areas can be suppressed too much; noise in very dark images can be mistaken for sparkles; the light field's "depth" is a proxy, not a real Z.
 * **AVIF output is plain HDR AVIF**, not a gain-map tmap container; SDR fallback is the viewer's job.
 * **24-bit JXL support is thin**: recent Chrome/Firefox decode it; Windows Photos and Explorer may not; DPI lives in the container `Exif` box, so only Exif-aware tools show it.
-* **No GPU**: the light field and blurs run on the CPU with NumPy.
+* **GPU covers only per-pixel math**: PQ encoding and gain coefficients run on the GPU (about 16× / 3.7×) and share the same tables as the CPU path, so 16-bit codes differ by at most 1 LSB; light-field analysis and blurs stay on the CPU and dominate above 6 MP (6.2 MP end to end 30.6 s: 8.5 s light field, \~20 s for 12-bit 4:4:4 AVIF).
 
 ## Technical documentation
 

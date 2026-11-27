@@ -261,3 +261,73 @@ def test_build_writes_iso_by_default(tmp_path: Path) -> None:
 
     rep = validate.validate_file(path)
     assert rep.ok, rep.errors
+
+
+def test_png_parallel_filter_matches_serial() -> None:
+    """并行滤波按块独立，字节流必须与逐行串行完全一致。"""
+    from hdrgainmap import png16
+
+    rng = np.random.default_rng(7)
+    arr = rng.integers(0, 65536, (160, 220, 3), dtype=np.uint16)
+    raw = arr.astype(">u2").tobytes()
+    assert png16._filter(raw, 220, 160, 1) == png16._filter(raw, 220, 160, 4)
+
+
+def test_parallel_build_matches_serial(tmp_path: Path) -> None:
+    """多路并行编码与串行结果逐字节一致。"""
+    src = tmp_path / "s.png"
+    img = np.full((96, 128, 3), 18, np.uint8)
+    img[30:70, 40:96] = 240
+    Image.fromarray(img, "RGB").save(src)
+
+    a = build(src, tmp_path / "a", formats=("jpeg", "png", "heic10"), jobs=1)
+    b = build(src, tmp_path / "b", formats=("jpeg", "png", "heic10"), jobs=3)
+    assert a["ok"] and b["ok"], (a["errors"], b["errors"])
+    for key in ("jpeg", "png", "heic10"):
+        assert Path(a["files"][key]).read_bytes() == Path(b["files"][key]).read_bytes(), key
+
+
+def test_gpu_matches_cpu() -> None:
+    """GPU 查表与 CPU 查表：码值最多差 1 个 16bit LSB。"""
+    from hdrgainmap import gpu
+
+    if not gpu.available():
+        pytest.skip("没有可用的 WebGPU 适配器")
+
+    rng = np.random.default_rng(11)
+    rgb = (rng.random((72, 96, 3), dtype=np.float32) ** 2).astype(np.float32)
+    emis = (rng.random((72, 96), dtype=np.float32) ** 2).astype(np.float32)
+    weights = np.array([1.02, 0.98, 1.05], np.float32)
+    ref, ref_peak = _hdr_code(rgb, emis, 1.2, weights, use_gpu=False)
+    got, peak = _hdr_code(rgb, emis, 1.2, weights, use_gpu=True)
+    diff = np.abs(got.astype(np.int32) - ref.astype(np.int32))
+    assert diff.max() <= 1
+    assert float((diff > 0).mean()) < 0.01
+    assert peak == pytest.approx(ref_peak, rel=1e-6)
+    log2_ref = _channel_terms(rgb, emis, 1.2, weights)[1]
+    log2_got, _ = gpu.expo(rgb, emis, 1.2, weights)
+    assert np.abs(log2_ref - log2_got).max() < 1e-5
+
+
+def test_lut_matches_exact_math() -> None:
+    """查表近似：sRGB 解码、exp2、tint、PQ 都要贴在解析值上。"""
+    from hdrgainmap import lut
+
+    v = np.linspace(0.0, 1.0, 4001, dtype=np.float32)
+    exact = np.where(v <= 0.04045, v / 12.92,
+                     ((v + 0.055) / 1.055) ** 2.4).astype(np.float32)
+    assert np.abs(lut.srgb_to_linear(v) - exact).max() < 1e-6
+
+    e = np.linspace(0.0, 2.0, 4001, dtype=np.float32)
+    assert np.abs(lut.exp2(e) - np.exp2(e)).max() < 1e-4
+
+    r = np.linspace(0.0, 2.0, 4001, dtype=np.float32)
+    want = np.clip(np.maximum(r, 0.0) ** 0.35, 0.85, 1.15)
+    assert np.abs(lut.tint(r) - want).max() < 2e-3
+
+    nits = np.linspace(0.0, 1000.0, 4001, dtype=np.float64)
+    y = np.clip(nits / 10000.0, 0, 1) ** (2610 / 16384)
+    ref = np.clip(((3424 / 4096 + (2413 / 4096 * 32) * y)
+                   / (1 + (2392 / 4096 * 32) * y)) ** (2523 / 4096 * 128), 0, 1)
+    got = lut.pq(nits.astype(np.float32)).astype(np.float64)
+    assert np.abs(got - ref).max() * 65535 < 0.05

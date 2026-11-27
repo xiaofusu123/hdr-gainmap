@@ -9,13 +9,15 @@ from __future__ import annotations
 import io
 import os
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from . import color, gainmap, heic10, jxl, png16, ultrahdr
+from . import gainmap, gpu, heic10, jxl, lut, png16, ultrahdr
 from . import light
 
 FORMATS = ("jpeg", "png", "heic10", "heic12", "avif", "jxl")
@@ -84,27 +86,33 @@ def _source_dpi(im: Image.Image) -> float:
 
 def _channel_terms(rgb: np.ndarray, emis: np.ndarray, gmax: float,
                    weights: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """返回 (线性 RGB, 每通道 log2 增益)。tint 按像素色相微调，再按亮度归一。"""
-    lin = color.srgb_to_linear(rgb)
-    lum = np.maximum(0.2126 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.0722 * lin[..., 2],
-                     1e-4)
-    tint = np.clip((lin / lum[..., None]) ** 0.35, 0.85, 1.15)
-    w = tint * weights.astype(np.float32)
-    w /= (0.2126 * w[..., 0] + 0.7152 * w[..., 1] + 0.0722 * w[..., 2])[..., None]
-    return lin, (gmax * emis[..., None] * w).astype(np.float32)
+    """返回 (线性 RGB, 每通道 log2 增益)。tint 按像素色相微调，再按亮度归一。
+
+    幂运算全部查 ``lut``：与 GPU 共用同一张表，两边结果对齐到码值。
+    """
+    lin = lut.srgb_to_linear(rgb)
+    lum = np.maximum(np.float32(0.2126) * lin[..., 0]
+                     + np.float32(0.7152) * lin[..., 1]
+                     + np.float32(0.0722) * lin[..., 2], np.float32(1e-4))
+    w = lut.tint(lin / lum[..., None]) * weights.astype(np.float32)
+    w /= (np.float32(0.2126) * w[..., 0] + np.float32(0.7152) * w[..., 1]
+          + np.float32(0.0722) * w[..., 2])[..., None]
+    return lin, (np.float32(gmax) * emis[..., None] * w).astype(np.float32)
 
 
 def _hdr_band(rgb: np.ndarray, emis: np.ndarray, gmax: float,
               weights: np.ndarray) -> tuple[np.ndarray, float]:
     """一块 RGB + emis → BT.2020 PQ 码值（0..1），返回峰值 nits。"""
     lin, expo = _channel_terms(rgb, emis, gmax, weights)
-    hdr = color.to_bt2020(lin * np.exp2(expo)) * SDR_WHITE_NITS
-    return np.clip(color.pq_oetf(hdr), 0.0, 1.0).astype(np.float32), float(hdr.max())
+    hdr = lut.to_bt2020(lin * lut.exp2(expo)) * np.float32(SDR_WHITE_NITS)
+    return np.clip(lut.pq(hdr), 0.0, 1.0).astype(np.float32), float(hdr.max())
 
 
 def _hdr_code(rgb: np.ndarray, emis: np.ndarray, gmax: float, weights: np.ndarray,
-              *, tile_rows: int = 2048) -> tuple[np.ndarray, float]:
-    """BT.709 线性光 → BT.2020 PQ 的 uint16 码值；按行分块控制内存。"""
+              *, tile_rows: int = 2048, use_gpu: bool = False) -> tuple[np.ndarray, float]:
+    """BT.709 线性光 → BT.2020 PQ 的 uint16 码值；GPU 可用时整张一次算完。"""
+    if use_gpu and gpu.available():
+        return gpu.encode_pq(rgb, emis, gmax, weights)
     h = rgb.shape[0]
     out = np.empty(rgb.shape, dtype=np.uint16)
     peak = 0.0
@@ -147,8 +155,9 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
           lift: float | None = None, peak_scale: float | None = None,
           embed_icc: bool = True, iso_flags: int = 0x40,
           alpha_bg: tuple[int, int, int] = (0, 0, 0),
-          tile_rows: int = 2048, log=None) -> dict:
-    """按格式生成 HDR 母版，返回文件、统计与耗时。lift / peak_scale 供试调。"""
+          tile_rows: int = 2048, use_gpu: bool = False, jobs: int = 1,
+          log=None) -> dict:
+    """按格式生成 HDR 母版，返回文件、统计与耗时。use_gpu/jobs 控制加速与并行。"""
     t_start = time.perf_counter()
     timings: dict[str, float] = {}
 
@@ -171,6 +180,9 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
         raise ValueError(f"quality 必须在 1–100，收到 {quality}")
     if dpi is not None and float(dpi) <= 0:
         raise ValueError(f"dpi 必须为正数，收到 {dpi}")
+
+    if use_gpu:                                  # 与读图/光场并行建管线
+        threading.Thread(target=gpu.warm, daemon=True).start()
 
     t0 = time.perf_counter()
     notify(f"读取 {src.name} …")
@@ -209,7 +221,8 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
 
     # 2) 重建 HDR 线性光并编码。PNG/HEIC/AVIF 三份产物逐像素来自同一份 q16。
     notify("编码 BT.2020 + PQ …")
-    q16, peak_nits = _hdr_code(rgb, emis, cfg["gmax"], w_light, tile_rows=tile_rows)
+    q16, peak_nits = _hdr_code(rgb, emis, cfg["gmax"], w_light,
+                               tile_rows=tile_rows, use_gpu=use_gpu)
     t0 = mark("hdr", t0)
 
     result: dict = {
@@ -227,23 +240,133 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
             "peak_nits": float(peak_nits),
         },
         "timings": timings,
+        "gpu": gpu.info() if (use_gpu and gpu.available()) else None,
     }
 
-    # 3) 各格式落盘；某个编码器失败只记录，不影响其它格式
+    # 3) 先把 JPEG 增益图算完（两遍扫全图），再让各编码器并行落盘
     stem = src.stem
     if debug:
         # 发光权重是中间场，最终增益才是编码进增益图的数据，两者分开落盘。
         Image.fromarray((emis * 255.0).astype(np.uint8)).save(outdir / f"{stem}_emis.png")
         gmax_debug = float(np.log2(max(float(gain.max()), 1.0)))
         _save_gain_debug(gain, outdir / f"{stem}_gainmap.png", gmax_debug)
+    del gain
+    lock = threading.Lock()
 
     def fail(key: str, exc: Exception) -> None:
-        result["errors"][key] = f"{type(exc).__name__}: {exc}"
+        with lock:
+            result["errors"][key] = f"{type(exc).__name__}: {exc}"
         notify(f"{key} 失败：{exc}")
 
-    if "jxl" in formats:
+    def run(key: str, fn) -> None:
+        t0 = time.perf_counter()
         try:
-            notify("编码 24bit JPEG XL …")
+            path = fn()
+        except Exception as exc:                     # noqa: BLE001
+            fail(key, exc)
+            return
+        with lock:
+            result["files"][key] = str(path)
+            timings[key] = round(time.perf_counter() - t0, 2)
+
+    gm_blob: bytes | None = None
+    if "jpeg" in formats:
+        notify("准备增益图 …")
+        t0 = time.perf_counter()
+        h, w = emis.shape
+        on_gpu = use_gpu and gpu.available()
+        # 两遍：先求每通道最大对数增益，再按通道归一化写码值（全分辨率 RGB）
+        expo_max = np.zeros(3, dtype=np.float64)
+        for y0 in range(0, h, tile_rows):
+            y1 = min(h, y0 + tile_rows)
+            band = emis[y0:y1]
+            if on_gpu:
+                _, em = gpu.expo(rgb[y0:y1], band, cfg["gmax"], w_light)
+            else:
+                _, ex = _channel_terms(rgb[y0:y1], band, cfg["gmax"], w_light)
+                em = ex.reshape(-1, 3).max(axis=0)
+            expo_max = np.maximum(expo_max, em)
+        expo_max = np.maximum(expo_max, 1e-4)
+
+        # 8bit 增益图 + 平滑渐变的等值线圈用 ±0.5 LSB 三角抖动打散
+        rng_a = np.random.default_rng(20261125)
+        rng_b = np.random.default_rng(7)
+        gm_px = np.empty((h, w, 3), dtype=np.uint8)
+        for y0 in range(0, h, tile_rows):
+            y1 = min(h, y0 + tile_rows)
+            band = emis[y0:y1]
+            if on_gpu:
+                expo = gpu.expo(rgb[y0:y1], band, cfg["gmax"], w_light)[0]
+            else:
+                expo = _channel_terms(rgb[y0:y1], band, cfg["gmax"], w_light)[1]
+            code = np.clip(expo / expo_max, 0.0, 1.0) * 255.0
+            code += (rng_a.random(code.shape, dtype=np.float32)
+                     - rng_b.random(code.shape, dtype=np.float32))
+            gm_px[y0:y1] = np.clip(code, 0.0, 254.0).astype(np.uint8)
+        gm = Image.fromarray(gm_px, "RGB")
+        del gm_px
+        if debug:
+            gm.save(outdir / f"{stem}_gainmap_embedded.png")
+        gm_buf = io.BytesIO()
+        gm.save(gm_buf, "JPEG", quality=quality, subsampling=0, optimize=True)
+        gm_blob = gm_buf.getvalue()
+        gmax_meta = float(expo_max.max())
+        gmax_channels = tuple(float(v) for v in expo_max)
+        result["gmax_meta"] = gmax_meta
+        result["gmax_channels"] = gmax_channels
+        timings["gainmap"] = round(time.perf_counter() - t0, 2)
+
+    # 各任务只读共享数组，互不写同一文件；AVIF 线程数随后按并行度回填
+    tasks = {}
+    avif_threads = 0
+
+    if "jpeg" in formats:
+        def do_jpeg() -> Path:
+            blob = ultrahdr.build(base_jpeg, gm_blob, gmax=gmax_meta,
+                                  gmax_channels=gmax_channels, dpi=dpi,
+                                  icc=_srgb_icc() if embed_icc else None,
+                                  iso_flags=iso_flags)
+            path = outdir / f"{stem}_ultrahdr.jpeg"
+            _write_atomic(path, blob)
+            return path
+
+        tasks["jpeg"] = do_jpeg
+
+    if "png" in formats:
+        def do_png() -> Path:
+            path = outdir / f"{stem}_hdr16_pq.png"
+            _write_atomic(path, png16.encode(q16, dpi=dpi, peak_nits=peak_nits,
+                                             jobs=jobs))
+            return path
+
+        tasks["png"] = do_png
+
+    for key, bits in (("heic10", 10), ("heic12", 12)):
+        if key not in formats:
+            continue
+
+        def do_heic(bits=bits) -> Path:
+            path = outdir / f"{stem}_hdr{bits}_pq.heic"
+            _write_atomic(path, heic10.encode(q16, bits=bits, quality=quality, dpi=dpi))
+            return path
+
+        tasks[key] = do_heic
+
+    if "avif" in formats:
+        def do_avif() -> Path:
+            from . import avif as avifmod
+            blob, bits = avifmod.encode(q16, bits=12, quality=quality, dpi=dpi,
+                                        threads=avif_threads)
+            path = outdir / f"{stem}_hdr{bits}_pq.avif"
+            _write_atomic(path, blob)
+            with lock:
+                result["stats"]["avif_bits"] = bits
+            return path
+
+        tasks["avif"] = do_avif
+
+    if "jxl" in formats:
+        def do_jxl() -> Path:
             fd, pfm_name = tempfile.mkstemp(prefix=f".{stem}.", suffix=".pfm",
                                             dir=str(outdir))
             os.close(fd)
@@ -254,99 +377,31 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
                 jxl.encode(pfm_path, tmp_jxl, "PQ", dpi=dpi)
                 path = outdir / f"{stem}_hdr24_pq.jxl"
                 os.replace(tmp_jxl, path)
+                return path
             finally:
                 for leftover in (pfm_path, tmp_jxl):
                     try:
                         leftover.unlink()
                     except FileNotFoundError:
                         pass
-            result["files"]["jxl"] = str(path)
-            t0 = mark("jxl", t0)
-        except Exception as exc:                 # noqa: BLE001
-            fail("jxl", exc)
 
-    if "jpeg" in formats:
-        try:
-            notify("编码 Ultra HDR JPEG …")
-            h, w = emis.shape
-            # 两遍：先求每通道最大对数增益，再按通道归一化写码值（全分辨率 RGB 增益图）
-            expo_max = np.zeros(3, dtype=np.float64)
-            for y0 in range(0, h, tile_rows):
-                y1 = min(h, y0 + tile_rows)
-                _, expo = _channel_terms(rgb[y0:y1], emis[y0:y1], cfg["gmax"], w_light)
-                expo_max = np.maximum(expo_max, expo.reshape(-1, 3).max(axis=0))
-            expo_max = np.maximum(expo_max, 1e-4)
+        tasks["jxl"] = do_jxl
 
-            # 8bit 增益图 + 平滑渐变的等值线圈用 ±0.5 LSB 三角抖动打散
-            rng_a = np.random.default_rng(20261125)
-            rng_b = np.random.default_rng(7)
-            gm_px = np.empty((h, w, 3), dtype=np.uint8)
-            for y0 in range(0, h, tile_rows):
-                y1 = min(h, y0 + tile_rows)
-                _, expo = _channel_terms(rgb[y0:y1], emis[y0:y1], cfg["gmax"], w_light)
-                code = np.clip(expo / expo_max, 0.0, 1.0) * 255.0
-                code += (rng_a.random(code.shape, dtype=np.float32)
-                         - rng_b.random(code.shape, dtype=np.float32))
-                gm_px[y0:y1] = np.clip(code, 0.0, 254.0).astype(np.uint8)
-            gm = Image.fromarray(gm_px, "RGB")
-            del gm_px
-            if debug:
-                gm.save(outdir / f"{stem}_gainmap_embedded.png")
-            gm_buf = io.BytesIO()
-            gm.save(gm_buf, "JPEG", quality=quality, subsampling=0, optimize=True)
-            gmax_meta = float(expo_max.max())
-            gmax_channels = tuple(float(v) for v in expo_max)
-            result["gmax_meta"] = gmax_meta
-            result["gmax_channels"] = gmax_channels
-            blob = ultrahdr.build(base_jpeg, gm_buf.getvalue(), gmax=gmax_meta,
-                                  gmax_channels=gmax_channels,
-                                  dpi=dpi, icc=_srgb_icc() if embed_icc else None,
-                                  iso_flags=iso_flags)
-            path = outdir / f"{stem}_ultrahdr.jpeg"
-            _write_atomic(path, blob)
-            result["files"]["jpeg"] = str(path)
-            result["stats"]["base_reused"] = bool(base_reused)
-            t0 = mark("jpeg", t0)
-        except Exception as exc:                 # noqa: BLE001
-            fail("jpeg", exc)
-    del rgb, gain, emis
+    workers = max(1, min(int(jobs), len(tasks))) if tasks else 1
+    avif_threads = max(1, (os.cpu_count() or 4) // workers)
+    result["workers"] = workers
+    notify(f"编码 {len(tasks)} 个格式（{workers} 路并行）…")
+    if workers == 1:
+        for key, fn in tasks.items():
+            run(key, fn)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(run, key, fn) for key, fn in tasks.items()]
+            for fut in as_completed(futures):
+                fut.result()
+    del rgb, emis, q16
 
-    if "png" in formats:
-        try:
-            notify("编码 16bit PNG …")
-            path = outdir / f"{stem}_hdr16_pq.png"
-            _write_atomic(path, png16.encode(q16, dpi=dpi, peak_nits=peak_nits))
-            result["files"]["png"] = str(path)
-            t0 = mark("png", t0)
-        except Exception as exc:                 # noqa: BLE001
-            fail("png", exc)
-
-    for key, bits in (("heic10", 10), ("heic12", 12)):
-        if key not in formats:
-            continue
-        try:
-            notify(f"编码 {bits}bit HEIC …")
-            path = outdir / f"{stem}_hdr{bits}_pq.heic"
-            _write_atomic(path, heic10.encode(q16, bits=bits,
-                                              quality=quality, dpi=dpi))
-            result["files"][key] = str(path)
-            t0 = mark(key, t0)
-        except Exception as exc:                 # noqa: BLE001
-            fail(key, exc)
-
-    if "avif" in formats:
-        try:
-            from . import avif as avifmod
-            notify("编码 12bit AVIF …")
-            blob, bits = avifmod.encode(q16, bits=12, quality=quality, dpi=dpi)
-            path = outdir / f"{stem}_hdr{bits}_pq.avif"
-            _write_atomic(path, blob)
-            result["files"]["avif"] = str(path)
-            result["stats"]["avif_bits"] = bits
-            t0 = mark("avif", t0)
-        except Exception as exc:                 # noqa: BLE001
-            fail("avif", exc)
-
+    result["stats"]["base_reused"] = bool(base_reused)
     timings["total"] = round(time.perf_counter() - t_start, 2)
     result["ok"] = not result["errors"]
     notify(f"完成，用时 {timings['total']:.1f}s")

@@ -33,7 +33,8 @@ def _run(cmd: list[str], raw: bytes, out_path: Path) -> None:
 
 
 def _encode_once(q16: np.ndarray, out_path: Path, transfer: str, bits: int,
-                 codec: str, crf: int, cpu_used: int, chroma: str = "444") -> None:
+                 codec: str, crf: int, cpu_used: int, chroma: str = "444",
+                 threads: int = 0) -> None:
     """跑一次 ffmpeg：rgb48 → BT.2020 NCL → yuv{444,420}p{10,12} → AVIF。"""
     h, w, _ = q16.shape
     pix_fmt = f"yuv{chroma}p{bits}le"
@@ -45,6 +46,8 @@ def _encode_once(q16: np.ndarray, out_path: Path, transfer: str, bits: int,
         "-crf", str(crf), "-cpu-used", str(cpu_used),
         "-f", "avif", str(out_path), "-y",
     ]
+    if threads > 0:                               # 0 = 交给 libaom 自己决定
+        cmd[cmd.index("-f"):cmd.index("-f")] = ["-threads", str(threads)]
     _run(cmd, q16.astype("<u2").tobytes(), out_path)
 
 
@@ -282,7 +285,7 @@ def decode(blob: bytes) -> np.ndarray:
 
 def encode(q16: np.ndarray, transfer: str = "PQ", bits: int = 12, quality: int = 100,
            cpu_used: int = 6, chroma: str = "444",
-           dpi: float | None = None) -> tuple[bytes, int]:
+           dpi: float | None = None, threads: int = 0) -> tuple[bytes, int]:
     """q16 → AVIF 字节，返回 (blob, 实际位深)。默认 12bit 4:4:4，失败逐级降级。"""
     if not available():
         raise RuntimeError("找不到 ffmpeg，无法生成 AVIF")
@@ -305,7 +308,8 @@ def encode(q16: np.ndarray, transfer: str = "PQ", bits: int = 12, quality: int =
             try:
                 if out.exists():
                     out.unlink()
-                _encode_once(q16, out, transfer, b, codec, crf, cpu_used, chroma_try)
+                _encode_once(q16, out, transfer, b, codec, crf, cpu_used, chroma_try,
+                             threads)
                 blob = out.read_bytes()
                 return add_exif_dpi(patch_nclx(blob, transfer), dpi), b
             except Exception as exc:            # noqa: BLE001  换下一个编码器

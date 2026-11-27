@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hdrgainmap"
-version = "0.2.0b1"
+version = "0.3.0b1"
 description = "把 8bit SDR 插画转成 HDR 母版：Ultra HDR JPEG / 16bit PNG / 10bit & 12bit HEIC / 12bit AVIF / 24bit JPEG XL"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,6 +14,9 @@ dependencies = [
     "pillow>=10.0",
     "pillow-heif>=1.8",
 ]
+
+[project.optional-dependencies]
+gpu = ["wgpu>=0.33"]
 
 [project.scripts]
 hdrgainmap = "hdrgainmap.cli:main"

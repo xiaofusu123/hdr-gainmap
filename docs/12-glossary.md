@@ -126,6 +126,8 @@
 
 **Linear perspective（线性透视）** — 平行线汇聚到消失点、物体按 `1/Z` 缩小的几何投影规律。见 [11](11-perspective.md)。
 
+**Lookup table / LUT（查找表）** — 把非线性函数按段采样成表，运行时只做线性插值。本项目用它统一 CPU 与 GPU 的 sRGB/tint/exp2/PQ 计算，16bit 码值差不超过 1。见 [02](02-pq-and-brightness.md)、[04](04-gain-map.md)。
+
 **Luminance（亮度）** — 视觉加权的辐射亮度，单位 cd/m²（nit）。见 [01](01-hdr-and-sdr.md)。
 
 **Luminosity function（视见函数）** — `V(λ)`，人眼对不同波长的敏感度，峰值 555 nm，`1 W = 683 lm`。见 [10](10-light-and-rendering.md)。

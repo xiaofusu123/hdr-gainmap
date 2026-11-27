@@ -17,7 +17,7 @@ description: hdr-gainmap 不靠 AI 提亮，而是用光线步进、多尺度漫
 
 ![示例源图](docs/images/sample-source.jpg)
 
-左：SDR 源图；右：生成的 HDR 母版在 SDR 屏幕上的近似预览（`gainmap.render_preview`）。预览只说明“哪里被抬亮”，不代表 HDR 屏上的真实亮度：
+上：SDR 源图；下：生成的 HDR 母版在 SDR 屏幕上的近似预览（`gainmap.render_preview`）。上下各占满整宽，不再左右对半压缩。预览只说明“哪里被抬亮”，不代表 HDR 屏上的真实亮度：
 
 ![SDR 源图与 HDR 预览对比](docs/images/sample-compare.jpg)
 
@@ -157,7 +157,7 @@ pip install -e .
 pip install -r requirements.txt
 ```
 
-依赖 `numpy`、`pillow`、`pillow-heif`；AVIF 需要系统里有 `ffmpeg`（带 libaom-av1）。24bit JXL 需要 `cjxl` 0.13+（libjxl），可放进 `PATH`，或用 `HDRGAINMAP_CJXL` / `HDRGAINMAP_JXLINFO` 指定路径；缺少 cjxl 时只让 jxl 这一项失败。Python 3.10+。
+依赖 `numpy`、`pillow`、`pillow-heif`；GPU 加速需要 `wgpu`（`pip install -e .[gpu]`），没有就自动走 CPU；AVIF 需要系统里有 `ffmpeg`（带 libaom-av1）。24bit JXL 需要 `cjxl` 0.13+（libjxl），可放进 `PATH`，或用 `HDRGAINMAP_CJXL` / `HDRGAINMAP_JXLINFO` 指定路径；缺少 cjxl 时只让 jxl 这一项失败。Python 3.10+。
 
 ## 用法
 
@@ -219,11 +219,13 @@ python -m hdrgainmap photo.png -o out --json --validate
 | `--alpha-bg`    | 透明图合成底色 `black`（默认）/ `white`                            |
 | `--validate`    | 生成后逐个产物跑合规校验，失败时退出码 1                                   |
 | `--debug`       | 额外落盘 `_emis.png`、`_gainmap.png`、`_gainmap_embedded.png` |
+| `-j, --jobs`    | 并行编码的格式数，同时作为各编码器线程数，默认 4                               |
+| `--gpu`         | `auto`（默认）/ `on` / `off`：PQ 与增益图逐像素数学是否走 WebGPU         |
 | `--quiet`       | 不打印进度                                                   |
 | `--json`        | JSON 输出（路径 + 统计 + 校验报告）                                 |
 | `--version`     | 打印版本                                                    |
 
-参数作用范围：`-q` 只影响 JPEG/HEIC/AVIF，PNG 与 JXL 始终无损；`--dpi` 写入所有产物的元数据（JXL 写进容器 `Exif` box）；`--alpha-bg` 只对带 alpha 的源生效。`--transfer` 与 `--gain-fullres` 已移除：传递函数固定 PQ，增益图固定全分辨率。
+参数作用范围：`-j` 让多个格式同时编码（`jxl` 与 `avif` 是子进程，`png` 的滤波按块并行）；`--gpu off` 可强制走 CPU；`-q` 只影响 JPEG/HEIC/AVIF，PNG 与 JXL 始终无损；`--dpi` 写入所有产物的元数据（JXL 写进容器 `Exif` box）；`--alpha-bg` 只对带 alpha 的源生效。`--transfer` 与 `--gain-fullres` 已移除：传递函数固定 PQ，增益图固定全分辨率。
 
 `--debug` 的三张图用途不同：`_emis.png` 是发光场（中间权重，不等于最终增益）；`_gainmap.png` 是标量增益的 log2 归一化可视化；`_gainmap_embedded.png` 是 Ultra HDR JPEG 里内嵌的那张 RGB 增益图（含抖动）。
 
@@ -256,7 +258,7 @@ print(res["stats"]["peak_nits"], res["stats"]["gmax_channels"])
             "gt2x_pct": 1.7, "peak_nits": 486.0, "base_reused": True},
   "timings": {"load": 0.02, "gain": 1.23, "hdr": 0.25, "jxl": 0.79,
               "jpeg": 0.45, "png": 0.76, "heic10": 0.99, "heic12": 0.97,
-              "avif": 1.83, "total": 7.27},
+              "avif": 2.36, "total": 4.37},
   "ok": True,
 }
 ```
@@ -364,7 +366,7 @@ HDR_c       = (SDR_c + OffsetSDR) * 2 ** log2_gain_c - OffsetHDR
 
 实测（本机 6 核 CPU）：
 
-* **1600×669 示例图**：全流程 7.27s，其中 gain 1.23s；Ultra HDR 0.87MB、PNG 3.94MB、HEIC 0.36MB、AVIF 1.73MB、JXL 5.73MB；峰值 486 nits，gmax 三通道 1.20/1.21/1.37；
+* **1600×669 示例图**：全流程 4.2s（4 路并行 + GPU；纯 CPU 串行 7.1s），其中 gain 1.7s、PQ 编码 0.13s；Ultra HDR 0.87MB、PNG 3.94MB、HEIC 0.36MB、AVIF 1.73MB、JXL 5.73MB；峰值 486 nits，gmax 三通道 1.20/1.21/1.37；
 * **重建精度**：从 Ultra HDR JPEG 解出的三通道增益，对比 PNG 母版，相对误差均值 1.3%、p95 4.2%，峰值 489 vs 486 nits；
 * **早期 70MP 测量**（供量级参考）：17.8MP 仅 Ultra HDR 约 45s；70.2MP 五种格式约 7.5 分钟（gain 181s、PNG 111s、AVIF 89s、HEIC 18s）；JXL 70.2MP 约 232s / 273MB，PFM 临时文件约 840MB。
 
@@ -402,7 +404,7 @@ python tests/test_roundtrip.py  # 也可以直接跑脚本
 * **启发式模型有边界**：超大面积的平亮表面可能被压得偏暗；极暗图上的噪点可能被当成细碎高光；光场的“深度”是代理，不是真实 Z。
 * **AVIF 是普通 HDR AVIF**，不是带增益图的 tmap 封装；SDR 回退同样交给查看器。
 * **24bit JXL 的查看器支持有限**：Chrome/Firefox 新版可解码，Windows 照片与资源管理器未必认 24bit；DPI 在容器 `Exif` box 里，只有读 Exif 的工具才显示。
-* **无 GPU 加速**：光场与模糊都在 CPU 上用 NumPy 完成。
+* **GPU 只覆盖逐像素部分**：PQ 编码与增益系数上显卡（约 16× / 3.7×），与 CPU 查同一组表，16bit 码值最多差 1 个 LSB；光场分析与模糊仍在 CPU，是 6MP 以上分辨率的主要成本（6.2MP 全流程 30.6s，其中光场 8.5s、AVIF 12bit 4:4:4 约 20s）。
 
 ## 技术文档
 

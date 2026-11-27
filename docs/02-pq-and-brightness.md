@@ -154,12 +154,12 @@ PQ 只是"怎么编码"，不规定"这张图最高到多少"。内容峰值由�
 `hdrgainmap/pipeline.py` 的 `_hdr_band()`（逐通道）：
 
 ```python
-lin = srgb_to_linear(rgb) * exp2(expo)            # 线性光，1.0 = SDR 白，逐通道
-hdr2020 = to_bt2020(lin)                          # BT.709 → BT.2020
-code = pq_oetf(hdr2020 * 203.0)                   # SDR 白 = 203 nits
+lin = lut.srgb_to_linear(rgb) * lut.exp2(expo)    # 线性光，1.0 = SDR 白，逐通道
+hdr2020 = lut.to_bt2020(lin)                      # BT.709 → BT.2020
+code = lut.pq(hdr2020 * 203.0)                    # SDR 白 = 203 nits
 ```
 
-三步：线性化、转色域、乘 203 后编码。`peak = lin.max() * 203` 统计实际峰值（写进 `stats.peak_nits`）。
+三步：线性化、转色域、乘 203 后编码。`peak = lin.max() * 203` 统计实际峰值（写进 `stats.peak_nits`）。幂运算查 `lut` 里的共享表（float64 建表、float32 线性插值），而不是直接在 float32 里算 `x^m1` 再 `**78.84`——后者指数会放大舍入，PQ 端自身约 0.9 个 16bit 码值的误差；查表既更接近双精度，也让 GPU 与 CPU 用同一份数据。
 
 因为输出是 16bit（PNG/HEIC/AVIF），`_hdr_code()` 把 0–1 的 PQ 信号乘 65535 再四舍五入，按 2048 行分块处理以控制内存。16bit 的 PQ 在 203 nits 处有约 38055 个码值，远超感知需求，所以**本项目输出的 banding 风险主要来自源图 8bit 和增益图 8bit，不来自 HDR 编码本身**。
 

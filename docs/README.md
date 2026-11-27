@@ -57,17 +57,19 @@
 
 ## 文档与代码的对应
 
-| 文档    | 主要对应模块                             | 说明                                       |
-| ----- | ---------------------------------- | ---------------------------------------- |
-| 02、03 | `hdrgainmap/color.py`              | sRGB/PQ 传递函数、BT.709→2020 矩阵（HLG 只在文档里对照） |
-| 04    | `hdrgainmap/gainmap.py`、`light.py` | 发光度估计、分通道权重、增益曲线；光场分析                    |
-| 05    | `ultrahdr.py`                      | JPEG 容器、MPF、XMP、ISO 21496-1              |
-| 06    | `png16.py`                         | cICP、滤波、zlib                             |
-| 07    | `heic10.py`                        | pillow-heif、nclx、Exif DPI                |
-| 08    | `avif.py`                          | ffmpeg/libaom、字节修补、降级顺序                  |
-| 09    | `jxl.py`                           | PFM 中转、cjxl 参数                           |
-| 04–09 | `pipeline.py`                      | 编排、统计、错误隔离                               |
-| 10、11 | `gainmap.py` 的 lit/AO/area 判据      | 光照与透视启发式的物理来源                            |
+| 文档    | 主要对应模块                             | 说明                                           |
+| ----- | ---------------------------------- | -------------------------------------------- |
+| 02、03 | `hdrgainmap/color.py`              | sRGB/PQ 传递函数、BT.709→2020 矩阵（HLG 只在文档里对照）     |
+| 02–04 | `hdrgainmap/lut.py`                | sRGB/tint/exp2/PQ 四张共享查找表（CPU 与 GPU 同一份采样代码） |
+| 04    | `hdrgainmap/gainmap.py`、`light.py` | 发光度估计、分通道权重、增益曲线；光场分析                        |
+| 05    | `ultrahdr.py`                      | JPEG 容器、MPF、XMP、ISO 21496-1                  |
+| 06    | `png16.py`                         | cICP、滤波、zlib                                 |
+| 07    | `heic10.py`                        | pillow-heif、nclx、Exif DPI                    |
+| 08    | `avif.py`                          | ffmpeg/libaom、字节修补、降级顺序                      |
+| 09    | `jxl.py`                           | PFM 中转、cjxl 参数                               |
+| 04–09 | `pipeline.py`                      | 编排、统计、错误隔离、并行编码                              |
+| 04    | `gpu.py`                           | PQ 与增益系数的 WebGPU 着色器（可选加速）                   |
+| 10、11 | `gainmap.py` 的 lit/AO/area 判据      | 光照与透视启发式的物理来源                                |
 
 ## 范围声明
 

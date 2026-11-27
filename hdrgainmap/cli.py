@@ -40,6 +40,10 @@ def _parser() -> argparse.ArgumentParser:
                    help="生成后对每个产物跑一遍合规校验")
     p.add_argument("--debug", action="store_true",
                    help="额外落盘 _emis / _gainmap / _gainmap_embedded 调试图")
+    p.add_argument("-j", "--jobs", type=int, default=4, metavar="N",
+                   help="并行编码的格式数 / 各编码器线程数（默认 4）")
+    p.add_argument("--gpu", default="auto", choices=["auto", "on", "off"],
+                   help="GPU 加速（WebGPU；默认 auto，无可用显卡时自动回退 CPU）")
     p.add_argument("--quiet", action="store_true", help="不打印进度")
     p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -50,14 +54,18 @@ def _run_one(args, src: str, alpha_bg: tuple[int, int, int], log) -> dict:
     """处理一张图；校验结果也合并进返回值。"""
     formats = tuple(s.strip().lower() for s in args.formats.split(",") if s.strip())
     res = build(src, args.outdir, formats=formats, quality=args.quality,
-                dpi=args.dpi, debug=args.debug, alpha_bg=alpha_bg, log=log)
+                dpi=args.dpi, debug=args.debug, alpha_bg=alpha_bg,
+                use_gpu=args.gpu != "off", jobs=max(1, args.jobs), log=log)
     if args.validate:
+        from concurrent.futures import ThreadPoolExecutor
+
         from . import validate
-        reports = {}
-        for kind, path in res["files"].items():
-            rep = validate.validate_file(path)
-            reports[kind] = rep.as_dict()
-            res.setdefault("report", {})[kind] = rep.as_dict()
+        items = list(res["files"].items())
+        with ThreadPoolExecutor(max_workers=max(1, min(args.jobs, len(items)))) as pool:
+            reports = dict(zip((k for k, _ in items),
+                               pool.map(lambda kv: validate.validate_file(kv[1]).as_dict(),
+                                        items)))
+        res["report"] = reports
         res["validation_ok"] = all(r["ok"] for r in reports.values())
         res["ok"] = bool(res["ok"]) and res["validation_ok"]
     return res
@@ -71,6 +79,8 @@ def _print_human(res: dict, args, reports: dict) -> None:
     print(f"增益   : 均值 {s['gain_mean']:.2f}×  最大 {s['gain_max']:.2f}×  "
           f"不动 {s['untouched_pct']:.1f}%  >2× {s['gt2x_pct']:.1f}%")
     print(f"峰值   : {s['peak_nits']:.0f} nits（SDR 白 203 nits）")
+    if res.get("gpu"):
+        print(f"加速   : GPU {res['gpu']['adapter']}  并行 {res.get('workers', 1)} 路")
     for k, v in res["files"].items():
         line = f"  {k:7s} {v}"
         if k in reports:

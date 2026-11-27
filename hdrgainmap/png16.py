@@ -36,32 +36,66 @@ def _paeth(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
     return np.where((pa <= pb) & (pa <= pc), a, np.where(pb <= pc, b, c)).astype(np.uint8)
 
 
-def _filter(raw: bytes, w: int, h: int) -> bytes:
-    """逐行挑残差绝对值最小的滤波（0-4），再 zlib 压缩。"""
+def _filter_block(rows: np.ndarray, stride: int, y0: int, y1: int) -> bytes:
+    """整块一起选滤波：每行只依赖原始行，行与行之间无递推，可并行。"""
+    cur = rows[y0:y1]
+    block = y1 - y0
+    if y0 == 0:                                  # 首行没有上一行，其余行往上取
+        prev = np.zeros((block, stride), np.uint8)
+        prev[1:] = rows[0:block - 1]
+    else:
+        prev = rows[y0 - 1:y1 - 1]
+    left, upleft = _shift_axis(cur), _shift_axis(prev)
+    mid = ((left.astype(np.int16) + prev.astype(np.int16)) >> 1).astype(np.uint8)
+    cands = np.stack([
+        cur,
+        (cur - left).astype(np.uint8),
+        (cur - prev).astype(np.uint8),
+        (cur - mid).astype(np.uint8),
+        (cur - _paeth(left, prev, upleft)).astype(np.uint8),
+    ])
+    cost = np.abs(cands.view(np.int8)).sum(axis=2)          # (5, block)
+    kind = cost.argmin(axis=0).astype(np.uint8)             # (block,)
+    picked = cands[kind, np.arange(block)]
+    out = np.empty((block, stride + 1), np.uint8)
+    out[:, 0] = kind
+    out[:, 1:] = picked
+    return out.tobytes()
+
+
+def _shift_axis(arr: np.ndarray) -> np.ndarray:
+    """沿行内右移 BPP 字节（左邻），用于整块向量化。"""
+    out = np.zeros_like(arr)
+    out[:, BPP:] = arr[:, :-BPP]
+    return out
+
+
+def _filter(raw: bytes, w: int, h: int, jobs: int = 1) -> bytes:
+    """逐行挑残差绝对值最小的滤波（0-4），再 zlib 压缩；jobs>1 时按块并行。"""
     stride = w * BPP
     rows = np.frombuffer(raw, np.uint8).reshape(h, stride)
-    prev = np.zeros(stride, np.uint8)
+    if jobs <= 1 or h < 64:
+        comp = zlib.compressobj(9)
+        parts = [_filter_block(rows, stride, y, y + 1) for y in range(h)]
+        return b"".join(comp.compress(p) for p in parts) + comp.flush()
+
+    # 每块约 48MB 候选：5 份残差 + 输出行
+    block = max(1, (48 << 20) // max(5 * stride, 1))
+    ranges = [(y, min(h, y + block)) for y in range(0, h, block)]
+    comp = zlib.compressobj(9)
     out = bytearray()
-    for y in range(h):
-        cur = rows[y]
-        left, upleft = _shift(cur, BPP), _shift(prev, BPP)
-        cands = [
-            (0, cur),
-            (1, (cur - left).astype(np.uint8)),
-            (2, (cur - prev).astype(np.uint8)),
-            (3, (cur - ((left.astype(np.int16) + prev.astype(np.int16)) >> 1).astype(np.uint8)).astype(np.uint8)),
-            (4, (cur - _paeth(left, prev, upleft)).astype(np.uint8)),
-        ]
-        kind, data = min(cands, key=lambda c: np.abs(c[1].view(np.int8)).sum())
-        out.append(kind)
-        out += data.tobytes()
-        prev = cur
-    return zlib.compress(bytes(out), 9)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=jobs) as ex:
+        for part in ex.map(lambda r: _filter_block(rows, stride, *r), ranges):
+            out += comp.compress(part)
+    out += comp.flush()
+    return bytes(out)
+
 
 
 def encode(q16: np.ndarray, dpi: float = 240.0, software: str = "hdr-gainmap",
-           peak_nits: float | None = None) -> bytes:
-    """q16 (h,w,3) uint16 PQ 码值 → PNG 字节；给 peak_nits 时写 mDCV/cLLI。"""
+           peak_nits: float | None = None, jobs: int = 1) -> bytes:
+    """q16 (h,w,3) uint16 PQ 码值 → PNG 字节；jobs>1 时并行滤波。"""
     h, w, _ = q16.shape
     ppm = int(round(dpi / 0.0254))                       # 每米像素数
     chunks = (b"\x89PNG\r\n\x1a\n"
@@ -75,7 +109,7 @@ def encode(q16: np.ndarray, dpi: float = 240.0, software: str = "hdr-gainmap",
     if peak_nits is not None and peak_nits > 0:
         units = int(round(float(peak_nits) / 1e-4))
         chunks += _chunk(b"cLLI", struct.pack(">II", units, units))
-    body = _chunk(b"IDAT", _filter(q16.astype(">u2").tobytes(), w, h))
+    body = _chunk(b"IDAT", _filter(q16.astype(">u2").tobytes(), w, h, jobs))
     return chunks + body + _chunk(b"IEND", b"")
 
 

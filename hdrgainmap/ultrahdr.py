@@ -24,7 +24,7 @@ CONTAINER_NS = "http://ns.google.com/photos/1.0/container/"
 ITEM_NS = "http://ns.google.com/photos/1.0/container/item/"
 
 DEFAULT_OFFSET = 1.0 / 64.0
-SOFTWARE = "hdr-gainmap 0.2.0b1"
+SOFTWARE = "hdr-gainmap 0.3.0b1"
 
 # MPF 段总长：marker(2)+length(2)+签名(4)+TIFF(4 字节序 + 4 IFD 偏移 + 42 IFD + 32 条目) = 90
 _MPF_SEG_LEN = 90
