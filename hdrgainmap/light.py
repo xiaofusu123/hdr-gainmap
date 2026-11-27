@@ -83,10 +83,11 @@ def guided_filter(guide: np.ndarray, src: np.ndarray, r: int,
         return src.astype(np.float32, copy=False)
     mean_i = _box(guide, r)
     mean_p = _box(src, r)
-    corr_i = _box(guide * guide, r)
-    corr_ip = _box(guide * src, r)
-    var_i = np.maximum(corr_i - mean_i * mean_i, 0.0)
-    cov_ip = corr_ip - mean_i * mean_p
+    # 居中求方差：E[x²]−μ² 在 f32 里是两个大数相减，平坦区会丢掉几位有效数字
+    di = guide - mean_i
+    dp = src - mean_p
+    var_i = np.maximum(_box(di * di, r), 0.0)
+    cov_ip = _box(di * dp, r)
     a = cov_ip / (var_i + eps)
     b = mean_p - a * mean_i
     return (_box(a, r) * guide + _box(b, r)).astype(np.float32)

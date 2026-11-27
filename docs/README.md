@@ -30,10 +30,10 @@
 | 格式               | 文档                         | 位深                     | 色度    | HDR 承载方式                           | SDR 回退           | 体积（1600×669 实测） |
 | ---------------- | -------------------------- | ---------------------- | ----- | ---------------------------------- | ---------------- | --------------- |
 | JPEG + Ultra HDR | [05](05-jpeg-ultra-hdr.md) | 8bit 基图 + 8bit RGB 增益图 | 4:4:4 | 增益图 + MPF + XMP + ISO（三通道 141B）    | 基图直接可看           | 0.87MB          |
-| PNG              | [06](06-png.md)            | 16bit                  | 4:4:4 | cICP(9/16/0/1) + mDCV/cLLI + PQ 码值 | 查看器自行解释（多按 sRGB） | 3.94MB          |
+| PNG              | [06](06-png.md)            | 16bit                  | 4:4:4 | cICP(9/16/0/1) + mDCV/cLLI + PQ 码值 | 查看器自行解释（多按 sRGB） | 3.92MB          |
 | HEIC 10/12       | [07](07-heic.md)           | 10/12bit               | 4:2:0 | HEVC Main10/12 + nclx(9/16/9)      | 查看器 tone mapping | 0.36MB          |
 | AVIF             | [08](08-avif.md)           | 12bit                  | 4:4:4 | AV1 + nclx(9/16/9)                 | 查看器 tone mapping | 1.73MB          |
-| JPEG XL          | [09](09-jpeg-xl.md)        | 24bit                  | 4:4:4 | 码流内 cICP（Rec2100PQ）                | 查看器自行解释          | 5.73MB          |
+| JPEG XL          | [09](09-jpeg-xl.md)        | 24bit                  | 4:4:4 | 码流内 cICP（Rec2100PQ）                | 查看器自行解释          | 5.62MB          |
 
 一句话取舍：**要兼容选 JPEG，要无损存档选 PNG，要苹果生态选 HEIC，要网页选 AVIF，要极限位深/验证选 JXL。**
 
@@ -68,7 +68,8 @@
 | 08    | `avif.py`                          | ffmpeg/libaom、字节修补、降级顺序                      |
 | 09    | `jxl.py`                           | PFM 中转、cjxl 参数                               |
 | 04–09 | `pipeline.py`                      | 编排、统计、错误隔离、并行编码                              |
-| 04    | `gpu.py`                           | PQ 与增益系数的 WebGPU 着色器（可选加速）                   |
+| 04    | `gpu.py`                           | PQ/增益系数的 WebGPU 着色器（可选加速）                    |
+| 04    | `gpufield.py`                      | GPU 模糊：扫描线前缀和、转置与逐元素内核                       |
 | 10、11 | `gainmap.py` 的 lit/AO/area 判据      | 光照与透视启发式的物理来源                                |
 
 ## 范围声明

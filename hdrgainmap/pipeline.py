@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import gainmap, gpu, heic10, jxl, lut, png16, ultrahdr
+from . import gainmap, gpu, gpufield, heic10, jxl, lut, png16, ultrahdr
 from . import light
 
 FORMATS = ("jpeg", "png", "heic10", "heic12", "avif", "jxl")
@@ -212,9 +212,14 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
         cfg["lift"] = float(lift)
     if peak_scale is not None:
         cfg["gmax"] = round(cfg["gmax"] / gainmap.PEAK_SCALE * float(peak_scale), 3)
-    _, emis = gainmap.emissive(rgb, cfg, y=y, scene=scene)
+    on_gpu_field = use_gpu and gpufield.available()
+    if on_gpu_field:
+        emis = gpufield.emissive(y, cfg, scene.irradiance, scene.ao)[1]
+        emis = gpufield.finalize(emis)
+    else:
+        _, emis = gainmap.emissive(rgb, cfg, y=y, scene=scene)
+        emis = gainmap.finalize(emis)
     del y
-    emis = gainmap.finalize(emis)
     gain = gainmap.gain_of(emis, cfg["gmax"], cfg["lift"])
     w_light = gainmap.channel_weights(rgb, scene=scene)
     t0 = mark("gain", t0)
@@ -241,6 +246,7 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
         },
         "timings": timings,
         "gpu": gpu.info() if (use_gpu and gpu.available()) else None,
+        "field": "gpu" if on_gpu_field else "cpu",
     }
 
     # 3) 先把 JPEG 增益图算完（两遍扫全图），再让各编码器并行落盘

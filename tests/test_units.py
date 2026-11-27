@@ -331,3 +331,38 @@ def test_lut_matches_exact_math() -> None:
                    / (1 + (2392 / 4096 * 32) * y)) ** (2523 / 4096 * 128), 0, 1)
     got = lut.pq(nits.astype(np.float32)).astype(np.float64)
     assert np.abs(got - ref).max() * 65535 < 0.05
+
+
+def test_gpu_field_matches_cpu() -> None:
+    """GPU 光场：模糊、导向滤波与五层判据都要和 CPU 版逐点对齐。"""
+    from hdrgainmap import gainmap, gpufield, light
+
+    if not gpufield.available():
+        pytest.skip("没有可用的 WebGPU 适配器")
+
+    rng = np.random.default_rng(5)
+    y = (rng.random((150, 210), np.float32) ** 2).astype(np.float32)
+    for r in (1, 4, 15):
+        assert np.abs(gainmap._gauss(y, r) - gpufield.gauss(y, r)).max() < 2e-5
+
+    ref = light.guided_filter(y, gainmap._gauss(y, 8), 6)
+    got = gpufield.guided(y, gpufield.gauss(y, 8), 6)
+    assert np.abs(ref - got).max() < 5e-5
+
+    rgb = np.repeat(y[..., None], 3, axis=2)
+    scene = light.analyze(rgb, y)
+    cfg = gainmap.adapt_params(rgb, y, scene)
+    _, ref_emis = gainmap.emissive(rgb, cfg, y, scene)
+    ref_fin = gainmap.finalize(ref_emis)
+    _, gpu_emis = gpufield.emissive(y, cfg, scene.irradiance, scene.ao)
+    gpu_fin = gpufield.finalize(gpu_emis)
+    assert np.abs(ref_emis - gpu_emis).max() < 2e-3
+    assert np.abs(ref_fin - gpu_fin).max() < 5e-4
+
+    g1 = gainmap.gain_of(ref_fin, cfg["gmax"])
+    g2 = gainmap.gain_of(gpu_fin, cfg["gmax"])
+    mx = max(float(g1.max()), float(g2.max()))
+    c1 = np.log2(np.maximum(g1, 1e-6)) / np.log2(mx)
+    c2 = np.log2(np.maximum(g2, 1e-6)) / np.log2(mx)
+    assert np.abs(np.floor(np.clip(c1, 0, 1) * 255)
+                  - np.floor(np.clip(c2, 0, 1) * 255)).max() <= 1

@@ -96,7 +96,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     out[i * 3u]      = u32(round(q.x * 65535.0));
     out[i * 3u + 1u] = u32(round(q.y * 65535.0));
     out[i * 3u + 2u] = u32(round(q.z * 65535.0));
-    atomicMax(&stats[0], bitcast<u32>(max(hdr.x, max(hdr.y, hdr.z))));
+    atomicMax(&stats[0], bitcast<u32>(max(0.0, max(hdr.x, max(hdr.y, hdr.z)))));
 }
 """)
 
@@ -112,7 +112,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let lum = 0.2126 * lin.x + 0.7152 * lin.y + 0.0722 * lin.z;
     let e = P.gmax * emis[i];
     let c = tinted(lin, lum, vec3<f32>(P.w0, P.w1, P.w2));
-    let expo = e * c;
+    let expo = max(e * c, vec3<f32>(0.0));   // 负值会让 bitcast 排到正数前面
     out[i * 3u]      = expo.x;
     out[i * 3u + 1u] = expo.y;
     out[i * 3u + 2u] = expo.z;
@@ -277,7 +277,7 @@ def _dispatch(shader: str, rgb: np.ndarray, emis: np.ndarray, gmax: float,
         device.queue.submit([enc.finish()])
         raw = device.queue.read_buffer(b_out)
         out[start:stop] = np.frombuffer(raw, out_dtype).reshape(cnt, 3)
-        st = np.frombuffer(device.queue.read_buffer(b_stat), np.uint32)
+        st = np.frombuffer(bytes(device.queue.read_buffer(b_stat)), np.uint32)
         stats = np.maximum(stats, st)
         for buf in (b_rgb, b_emis, b_par, b_out, b_stat):
             buf.destroy()

@@ -113,7 +113,7 @@ base_lit = 0.78 - 0.16*t
 ```python
 illum = guided_filter(Y, gauss(Y, min(h, w)//25), r//2)   # edge-preserving low band
 lit   = smoothstep(p38(illum), p99(illum), illum)          # lit regions
-peak  = Y / (gauss(Y, 25) + 1e-4)
+peak  = Y / (gauss(Y, 25) + 1e-3)
 spark = smoothstep(1.45, 2.90, peak)                       # point highlights
 area  = gauss(lit, min(h, w)//8)
 pen   = 0.55 * smoothstep(0.35, 0.85, area) * (1 - 0.7*spark)
@@ -223,7 +223,7 @@ Files are processed in the order given; one failure does not stop the rest. `--q
 | `--json`        | JSON with paths, stats and validation reports                   |
 | `--version`     | print version                                                   |
 
-Scope: `-q` affects JPEG/HEIC/AVIF only (PNG and JXL are always lossless); `--dpi` is written to every output, JXL included (container `Exif` box); `--alpha-bg` only matters for sources with alpha. `-j` encodes several formats at once (JXL and AVIF are subprocesses, the PNG filter is parallel by block); `--gpu off` forces the CPU path; `--transfer` and `--gain-fullres` were removed: transfer is always PQ and the gain map is always full-resolution.
+Scope: `-q` affects JPEG/HEIC/AVIF only (PNG and JXL are always lossless); `--dpi` is written to every output, JXL included (container `Exif` box); `--alpha-bg` only matters for sources with alpha. `-j` encodes several formats at once (JXL and AVIF are subprocesses, the PNG filter is parallel by block); `--gpu off` forces the CPU path for both the field blurs and the per-pixel math; `--transfer` and `--gain-fullres` were removed: transfer is always PQ and the gain map is always full-resolution.
 
 The three debug images differ: `_emis.png` is the emission field (intermediate weights, not final gain); `_gainmap.png` is a log2-normalised view of the scalar gain; `_gainmap_embedded.png` is the RGB map actually embedded in the JPEG (with dither).
 
@@ -252,7 +252,7 @@ print(res["stats"]["peak_nits"], res["stats"]["gmax_channels"])
   "gmax_meta": 1.374893, "gmax_channels": [1.201138, 1.214826, 1.374893],
   "files": {"jpeg": "...", "png": "...", "heic12": "..."},
   "errors": {},
-  "stats": {"gain_mean": 1.212, "gain_max": 2.230, "untouched_pct": 48.4,
+  "stats": {"gain_mean": 1.212, "gain_max": 2.230, "untouched_pct": 48.7,
             "gt2x_pct": 1.7, "peak_nits": 486.0, "base_reused": True},
   "timings": {"load": 0.02, "gain": 1.23, "hdr": 0.25, "jxl": 0.79,
               "jpeg": 0.45, "png": 0.76, "heic10": 0.99, "heic12": 0.97,
@@ -364,7 +364,7 @@ Quality-first defaults:
 
 Measured (6-core CPU):
 
-* **1600×669 example**: 4.2 s end to end (4-way parallel + GPU; 7.1 s serial on CPU), gain 1.7 s and PQ encoding 0.13 s; Ultra HDR 0.87 MB, PNG 3.94 MB, HEIC 0.36 MB, AVIF 1.73 MB, JXL 5.73 MB; peak 486 nits; per-channel gmax 1.20 / 1.21 / 1.37;
+* **1600×669 example**: 4.5 s end to end (4-way parallel + GPU; 4.8 s on CPU — about level at this size), gain 1.8 s and PQ encoding 0.02 s; Ultra HDR 0.87 MB, PNG 3.92 MB, HEIC 0.36 MB, AVIF 1.73 MB, JXL 5.62 MB; peak 486 nits; per-channel gmax 1.20 / 1.21 / 1.38;
 * **Reconstruction**: gains decoded from the Ultra HDR JPEG versus the PNG master show 1.3% mean relative error, 4.2% p95, peak 489 vs 486 nits;
 * **earlier 70 MP measurements** (order of magnitude only): 17.8 MP Ultra HDR alone ≈ 45 s; 70.2 MP five formats ≈ 7.5 min (gain 181 s, PNG 111 s, AVIF 89 s, HEIC 18 s); 70.2 MP JXL ≈ 232 s / 273 MB with an ≈ 840 MB temporary PFM.
 
@@ -402,7 +402,7 @@ Coverage: PQ round-trip, adaptive parameters, all six formats, 24-bit JXL depth/
 * **Heuristic limits**: very large flat bright areas can be suppressed too much; noise in very dark images can be mistaken for sparkles; the light field's "depth" is a proxy, not a real Z.
 * **AVIF output is plain HDR AVIF**, not a gain-map tmap container; SDR fallback is the viewer's job.
 * **24-bit JXL support is thin**: recent Chrome/Firefox decode it; Windows Photos and Explorer may not; DPI lives in the container `Exif` box, so only Exif-aware tools show it.
-* **GPU covers only per-pixel math**: PQ encoding and gain coefficients run on the GPU (about 16× / 3.7×) and share the same tables as the CPU path, so 16-bit codes differ by at most 1 LSB; light-field analysis and blurs stay on the CPU and dominate above 6 MP (6.2 MP end to end 30.6 s: 8.5 s light field, \~20 s for 12-bit 4:4:4 AVIF).
+* **GPU covers per-pixel math and full-resolution blurs**: PQ encoding, gain coefficients and the box/guided filters inside `emissive` all run on the GPU (at 6.2 MP, gain 7.8 s → 1.8 s and PQ 4.0 s → 0.12 s), with 8-bit gain maps byte-identical and 16-bit codes differing by at most 1 LSB; `light.analyze` (multi-scale blurs plus ray marching on a 640 px long edge) stays on the CPU. 6.2 MP end to end drops from 38.0 s to 23.5 s, at which point 12-bit 4:4:4 AVIF (\~20 s) dominates.
 
 ## Technical documentation
 

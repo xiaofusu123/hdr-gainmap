@@ -198,7 +198,7 @@ def emissive(rgb: np.ndarray, cfg: dict,
     # 阈值区间要够宽，否则渐变处出现等值线圈
     lo, hi = (float(np.percentile(illum, q)) for q in (38, 99))
     lit = _smoothstep(lo, max(hi, lo + 1e-3), illum)          # 被照到的整片区域
-    peak = y / (_gauss(y, cfg["pr"]) + 1e-4)
+    peak = y / (_gauss(y, cfg["pr"]) + 1e-3)
     spark = _smoothstep(cfg["p0"], cfg["p1"], peak)           # 细碎高光
 
     # 面积惩罚：低频面积大 = 白墙/天空；spark 强的点光源只罚 30%

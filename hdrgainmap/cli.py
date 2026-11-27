@@ -43,7 +43,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("-j", "--jobs", type=int, default=4, metavar="N",
                    help="并行编码的格式数 / 各编码器线程数（默认 4）")
     p.add_argument("--gpu", default="auto", choices=["auto", "on", "off"],
-                   help="GPU 加速（WebGPU；默认 auto，无可用显卡时自动回退 CPU）")
+                   help="GPU 加速（WebGPU：光场模糊与逐像素编码；无可用显卡时回退 CPU）")
     p.add_argument("--quiet", action="store_true", help="不打印进度")
     p.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -80,7 +80,9 @@ def _print_human(res: dict, args, reports: dict) -> None:
           f"不动 {s['untouched_pct']:.1f}%  >2× {s['gt2x_pct']:.1f}%")
     print(f"峰值   : {s['peak_nits']:.0f} nits（SDR 白 203 nits）")
     if res.get("gpu"):
-        print(f"加速   : GPU {res['gpu']['adapter']}  并行 {res.get('workers', 1)} 路")
+        field = "光场+编码" if res.get("field") == "gpu" else "仅逐像素"
+        print(f"加速   : GPU {res['gpu']['adapter']}（{field}）  "
+              f"并行 {res.get('workers', 1)} 路")
     for k, v in res["files"].items():
         line = f"  {k:7s} {v}"
         if k in reports:
