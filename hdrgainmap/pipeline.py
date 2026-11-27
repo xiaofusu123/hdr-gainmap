@@ -6,6 +6,7 @@
   heic10  10bit HEVC Main10，兼容性最好
   heic12  12bit HEVC Main12，色深最高
   avif    12bit AV1，体积最小
+  jxl     24bit JPEG XL，高位深无损母版（需要 cjxl）
 
 所有编码器默认质量 100；颜色统一走 BT.2020 + PQ（或 HLG），
 HEIC/AVIF 写 nclx 9/16(PQ) 或 18(HLG)/9，PNG 写 cICP 9/16/0/1。
@@ -24,9 +25,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import color, gainmap, heic10, png16, ultrahdr
+from . import color, gainmap, heic10, jxl, png16, ultrahdr
 
-FORMATS = ("jpeg", "png", "heic10", "heic12", "avif")
+FORMATS = ("jpeg", "png", "heic10", "heic12", "avif", "jxl")
 QUALITY = 100
 HLG_PEAK_NITS = 1000.0
 JPEG_SUFFIXES = {".jpg", ".jpeg", ".jpe", ".jfif"}
@@ -94,28 +95,50 @@ def _source_dpi(im: Image.Image) -> float:
     return 96.0
 
 
-def _hdr_code(rgb: np.ndarray, gain: np.ndarray, transfer: str,
-              *, tile_rows: int = 2048) -> tuple[np.ndarray, float]:
-    """线性 BT.709 光（SDR 白=203nits 基准）→ BT.2020 + PQ/HLG 的 uint16 码值。
+def _hdr_band(rgb: np.ndarray, gain: np.ndarray, transfer: str) -> tuple[np.ndarray, float]:
+    """一块 RGB + 增益 → BT.2020 PQ/HLG 的浮点码值（0..1），并返回峰值 nits。
 
     PQ 用绝对亮度（×203 nits）；HLG 是相对信号，1.0 对应 1000 nits 峰值，
-    SDR 白落在 ~0.75，所以要先除以峰值再编码。
-    返回 (码值, 峰值 nits)；按行分块，峰值内存只与 tile_rows 有关。
+    SDR 白落在 ~0.75，所以要先除以峰值再编码。24bit JXL 与 16bit 母版共用
+    这一份换算，保证两种位深的码值来自同一条曲线。
     """
+    lin = color.srgb_to_linear(rgb) * gain[..., None]
+    hdr2020 = color.to_bt2020(lin)
+    if transfer == "HLG":
+        code = color.hlg_oetf(hdr2020, HLG_PEAK_NITS / SDR_WHITE_NITS)
+    else:
+        code = color.pq_oetf(hdr2020 * SDR_WHITE_NITS)
+    return np.clip(code, 0.0, 1.0).astype(np.float32), float(lin.max()) * SDR_WHITE_NITS
+
+
+def _hdr_code(rgb: np.ndarray, gain: np.ndarray, transfer: str,
+              *, tile_rows: int = 2048) -> tuple[np.ndarray, float]:
+    """线性 BT.709 光 → BT.2020 PQ/HLG 的 uint16 码值；按行分块控制内存。"""
     h, w, _ = rgb.shape
     out = np.empty((h, w, 3), dtype=np.uint16)
     peak = 0.0
     for y0 in range(0, h, tile_rows):
         y1 = min(h, y0 + tile_rows)
-        lin = color.srgb_to_linear(rgb[y0:y1]) * gain[y0:y1, :, None]
-        peak = max(peak, float(lin.max()))
-        hdr2020 = color.to_bt2020(lin)
-        if transfer == "HLG":
-            code = color.hlg_oetf(hdr2020, HLG_PEAK_NITS / SDR_WHITE_NITS)
-        else:
-            code = color.pq_oetf(hdr2020 * SDR_WHITE_NITS)
+        code, band_peak = _hdr_band(rgb[y0:y1], gain[y0:y1], transfer)
+        peak = max(peak, band_peak)
         out[y0:y1] = np.clip(np.round(code * 65535.0), 0, 65535).astype(np.uint16)
-    return out, peak * SDR_WHITE_NITS
+    return out, peak
+
+
+def _write_pfm(rgb: np.ndarray, gain: np.ndarray, transfer: str, path: Path,
+               *, tile_rows: int = 2048) -> None:
+    """写 PFM 给 cjxl：float32 能无损装下 24bit 码值。
+
+    cjxl 不读 PNG 的 PQ/HLG 标记，PFM 则允许显式指定 Rec.2100 色彩编码；
+    PFM 规定行序自下而上，所以按块写入时要翻转行。
+    """
+    h, w, _ = rgb.shape
+    with open(path, "wb") as fh:
+        fh.write(f"PF\n{w} {h}\n-1.0\n".encode("ascii"))
+        for y1 in range(h, 0, -tile_rows):
+            y0 = max(0, y1 - tile_rows)
+            code, _ = _hdr_band(rgb[y0:y1], gain[y0:y1], transfer)
+            fh.write(np.ascontiguousarray(code[::-1]).astype("<f4").tobytes())
 
 
 def _save_gain_debug(gain: np.ndarray, path: Path, gmax_meta: float,
@@ -241,11 +264,36 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
         Image.fromarray((emis * 255.0).astype(np.uint8)).save(outdir / f"{stem}_emis.png")
         gmax_debug = float(np.log2(max(float(gain.max()), 1.0)))
         _save_gain_debug(gain, outdir / f"{stem}_gainmap.png", gmax_debug)
-    del rgb
 
     def fail(key: str, exc: Exception) -> None:
         result["errors"][key] = f"{type(exc).__name__}: {exc}"
         notify(f"{key} 失败：{exc}")
+
+    if "jxl" in formats:
+        try:
+            notify("编码 24bit JPEG XL …")
+            fd, pfm_name = tempfile.mkstemp(prefix=f".{stem}.", suffix=".pfm",
+                                            dir=str(outdir))
+            os.close(fd)
+            pfm_path = Path(pfm_name)
+            # JXL 固定 PQ + BT.2020：24bit 母版不跟随 --transfer 走 HLG。
+            tmp_jxl = outdir / f".{stem}.pq.tmp.jxl"
+            try:
+                _write_pfm(rgb, gain, "PQ", pfm_path, tile_rows=tile_rows)
+                jxl.encode(pfm_path, tmp_jxl, "PQ")
+                path = outdir / f"{stem}_hdr24_pq.jxl"
+                os.replace(tmp_jxl, path)
+            finally:
+                for leftover in (pfm_path, tmp_jxl):
+                    try:
+                        leftover.unlink()
+                    except FileNotFoundError:
+                        pass
+            result["files"]["jxl"] = str(path)
+            t0 = mark("jxl", t0)
+        except Exception as exc:                 # noqa: BLE001
+            fail("jxl", exc)
+    del rgb
 
     if "jpeg" in formats:
         try:

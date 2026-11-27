@@ -9,11 +9,12 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hdrgainmap import avif, color, gainmap, heic10, png16, ultrahdr, validate  # noqa: E402
+from hdrgainmap import avif, color, gainmap, heic10, jxl, png16, ultrahdr, validate  # noqa: E402
 from hdrgainmap.pipeline import FORMATS, build                               # noqa: E402
 
 
@@ -58,7 +59,9 @@ def test_build_all_formats(tmp_path: Path) -> None:
     """全部格式：产物齐全、校验通过、增益只落在光点上。"""
     src = tmp_path / "src.png"
     make_source(src)
-    formats = tuple(f for f in FORMATS if f != "avif" or avif.available())
+    formats = tuple(f for f in FORMATS
+                    if (f != "avif" or avif.available())
+                    and (f != "jxl" or jxl.available()))
     res = build(src, tmp_path / "out", formats=formats)
 
     files = res["files"]
@@ -134,6 +137,22 @@ def test_quality_control(tmp_path: Path) -> None:
     big = build(src, tmp_path / "q100", formats=("heic10",), quality=100)
     assert (Path(small["files"]["heic10"]).stat().st_size
             < Path(big["files"]["heic10"]).stat().st_size)
+
+
+def test_jxl_24bit(tmp_path: Path) -> None:
+    """24bit JXL 必须是真 24bit（不是 16bit 重标），且色彩编码为 Rec.2100 PQ。"""
+    if not jxl.available():
+        pytest.skip("cjxl 不可用（设 HDRGAINMAP_CJXL 或放入 PATH）")
+    src = tmp_path / "src.png"
+    make_source(src)
+    res = build(src, tmp_path / "jxl", formats=("jxl",), transfer="PQ")
+    assert res["ok"], res["errors"]
+    path = Path(res["files"]["jxl"])
+    assert path.stat().st_size > 0
+    rep = validate.validate_file(str(path))
+    assert rep.ok, rep.format()
+    assert rep.info.get("bits") == 24, rep.info
+    assert str(rep.info.get("transfer", "")).upper().startswith("PQ"), rep.info
 
 
 def main() -> int:

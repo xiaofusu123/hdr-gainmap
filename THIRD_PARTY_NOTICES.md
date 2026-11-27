@@ -30,13 +30,14 @@ not link against their libraries.
 | SVT-AV1 | AV1 encoding fallback (through FFmpeg) | BSD-3-Clause Clear | <https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/LICENSE.md> |
 | x264 | H.264 encoding (through FFmpeg) | GPL-2.0 | <https://www.videolan.org/developers/x264.html> |
 | x265 | HEVC encoding (through FFmpeg and pillow-heif wheels) | GPL-2.0 or commercial | <https://www.x265.org/> · <https://bitbucket.org/multicoreware/x265_git/raw/master/COPYING> |
+| libjxl / cjxl 0.13 | 24-bit JPEG XL encoding (external executable) | BSD-3-Clause | <https://github.com/libjxl/libjxl/blob/main/LICENSE> |
 | libheif | HEIC container handling (through pillow-heif) | LGPL-3.0 (library); MIT for sample apps/wrappers | <https://github.com/strukturag/libheif/blob/master/COPYING> |
 | libde265 | HEVC decoding (through libheif) | LGPL-3.0 | <https://github.com/strukturag/libde265/blob/master/COPYING> |
 
 ## Compliance notes
 
 - This repository distributes only original Python source code under MIT. It
-  does not include FFmpeg, libheif, x264, x265, libaom or SVT-AV1 binaries.
+  does not include FFmpeg, libheif, x264, x265, libaom, SVT-AV1 or libjxl/cjxl binaries.
 - FFmpeg is executed as a separate program. Because there is no linking, the
   MIT license of this project is not changed by the GPLv3 FFmpeg build.
 - If you redistribute the GPLv3 FFmpeg build or a `pillow-heif` wheel that

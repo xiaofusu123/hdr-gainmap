@@ -1,4 +1,4 @@
-"""严格校验 HDR 产物：Ultra HDR JPEG / 16bit PQ/HLG PNG / 10/12bit HDR HEIC / HDR AVIF。
+"""严格校验 HDR 产物：Ultra HDR JPEG / 16bit PQ/HLG PNG / 10/12bit HDR HEIC / HDR AVIF / 24bit JXL。
 
 Ultra HDR 部分逐条镜像 Android Ultra HDR v1.1 与 libultrahdr 的
 ``hasValidMpfAssociation()``：任何一条不满足，解码器都会悄悄忽略增益图回退 SDR。
@@ -788,6 +788,47 @@ def validate_avif(blob: bytes, path: str = "", deep: bool = True,
     return rep
 
 
+def validate_jxl(blob: bytes, path: str = "", deep: bool = True,
+                 expect_transfer: str | None = None) -> Report:
+    """检查 24bit JXL 的容器签名、位深与 Rec.2100 色彩编码。
+
+    位深/传递函数只能靠 jxlinfo 读；没有 jxlinfo 时退化为签名检查并给出警告，
+    不把"文件能打开"误报成"24bit 正确"。
+    """
+    from . import jxl as jxlmod
+
+    rep = Report("jxl", path)
+    rep.info["bytes"] = len(blob)
+    if not (blob.startswith(jxlmod.CONTAINER_MAGIC) or blob.startswith(jxlmod.CODESREAM_MAGIC)):
+        rep.err("不是 JPEG XL（容器/码流签名错误）")
+        return rep
+
+    if not deep:
+        return rep
+    try:
+        info = jxlmod.info(path)
+    except Exception as exc:                       # noqa: BLE001
+        rep.err(f"jxlinfo 读取失败：{exc}")
+        return rep
+    if not info:
+        rep.warn("未找到 jxlinfo，无法校验位深与传递函数（设 HDRGAINMAP_JXLINFO 或放入 PATH）")
+        return rep
+    rep.info.update({k: v for k, v in info.items() if k != "raw"})
+    bits = info.get("bits")
+    if bits != 24:
+        rep.err(f"位深 {bits}bit（应为 24bit）")
+    transfer = str(info.get("transfer", ""))
+    if expect_transfer:
+        if not transfer.upper().startswith(expect_transfer):
+            rep.err(f"传递函数 {transfer!r}（应为 {expect_transfer}）")
+    elif not transfer.upper().startswith(("PQ", "HLG")):
+        rep.err(f"传递函数 {transfer!r}（应为 PQ 或 HLG）")
+    primaries = str(info.get("primaries", ""))
+    if primaries and "2100" not in primaries:
+        rep.err(f"原色 {primaries!r}（应为 Rec.2100）")
+    return rep
+
+
 def validate_file(path: str, deep: bool = True) -> Report:
     with open(path, "rb") as fh:
         blob = fh.read()
@@ -795,6 +836,11 @@ def validate_file(path: str, deep: bool = True) -> Report:
         if b"MPF\x00" in blob[:4096] or b"hdrgm:Version" in blob[:65536]:
             return validate_ultrahdr(blob, path, deep=deep)
         return validate_jpeg(blob, path)
+    from . import jxl as jxlmod
+    if blob.startswith(jxlmod.CONTAINER_MAGIC) or blob.startswith(jxlmod.CODESREAM_MAGIC):
+        lower = path.lower()
+        expect = "PQ" if lower.endswith("_pq.jxl") else "HLG" if lower.endswith("_hlg.jxl") else None
+        return validate_jxl(blob, path, deep=deep, expect_transfer=expect)
     if blob[:8] == b"\x89PNG\r\n\x1a\n":
         return validate_png16(blob, path, deep=deep)
     if blob[4:8] == b"ftyp":

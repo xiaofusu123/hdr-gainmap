@@ -1,15 +1,15 @@
 ---
 title: hdr-gainmap User Guide
 slug: hdr-gainmap-en
-summary: Turn 8-bit SDR illustrations into five HDR deliverables, lifting only what actually glows.
-description: hdr-gainmap estimates where light comes from with an illumination field, diffusion, ambient occlusion and a flat-area penalty, then encodes Ultra HDR JPEG, 16-bit PNG, 10/12-bit HEIC and 12-bit AVIF from one gain curve.
+summary: Turn 8-bit SDR illustrations into six HDR deliverables, lifting only what actually glows.
+description: hdr-gainmap estimates where light comes from with an illumination field, diffusion, ambient occlusion and a flat-area penalty, then encodes Ultra HDR JPEG, 16-bit PNG, 10/12-bit HEIC, 12-bit AVIF and 24-bit JPEG XL from one gain curve.
 ---
 
 [简体中文](README.md) | **English**
 
-**Turn 8-bit SDR illustrations into HDR masters**: one command produces Ultra HDR JPEG, 16-bit PNG, 10/12-bit HEIC and 12-bit AVIF. There are no presets — the gain parameters are derived from each image's own light distribution.
+**Turn 8-bit SDR illustrations into HDR masters**: one command produces Ultra HDR JPEG, 16-bit PNG, 10/12-bit HEIC, 12-bit AVIF and 24-bit JPEG XL. There are no presets — the gain parameters are derived from each image's own light distribution.
 
-**Version: Beta 0.1.1**.
+**Version: Beta 0.1.2**.
 
 ## Examples
 
@@ -31,15 +31,15 @@ Full-resolution gain map written by `--gain-fullres --debug`. Whiter means more 
 
 The gain map is half-resolution by default; decode with `gain = 2 ** (pixel / 255 * GainMapMax)` and HDR linear = SDR linear × gain.
 
-## How it works: one gain curve, five containers
+## How it works: one gain curve, six containers
 
-SDR pixels are linearised with the sRGB EOTF to `L_sdr`, multiplied by one scalar gain `g` to give `L_hdr = g · L_sdr`, converted to BT.2020 and encoded as PQ or HLG. All five deliverables share this curve; only the container, bit depth and chroma sampling differ, so "what glows" is identical across formats. `g = 2 ** (gmax · em)` with `em ∈ [0, 1)`, so gain spans `[1, 2**gmax)`; `gmax` comes from the image's own exposure percentiles.
+SDR pixels are linearised with the sRGB EOTF to `L_sdr`, multiplied by one scalar gain `g` to give `L_hdr = g · L_sdr`, converted to BT.2020 and encoded as PQ or HLG. All six deliverables share this curve; only the container, bit depth and chroma sampling differ, so "what glows" is identical across formats. `g = 2 ** (gmax · em)` with `em ∈ [0, 1)`, so gain spans `[1, 2**gmax)`; `gmax` comes from the image's own exposure percentiles.
 
 * **PQ is absolute**: `L_hdr` is scaled with SDR white = 203 nits into cd/m² and encoded. 203 nits is PQ code ≈ 0.58, so a PQ file shown in an SDR viewer looks grey — not a broken file, just no HDR rendering path.
 * **HLG is relative**: SDR white sits near 75% and the display applies its own OOTF (this tool encodes against a 1000-nit peak). HLG displays with SDR compatibility can show it directly, at the cost of a less controllable peak.
 * **Ultra HDR stores no second HDR image**: it is an 8-bit SDR base plus an 8-bit gain map. The map is normalised in log2 to `[0, GainMapMax]` (1.45 EV upper bound in this project); the decoder interpolates by display headroom and multiplies it back into SDR. Output follows Ultra HDR 1.1: XMP `hdrgm` and ISO 21496-1 are written together; 1.1 is backward-compatible with 1.0.
 
-## Five outputs
+## Six outputs
 
 | Format   | Depth / codec                                                     | Typical use                                          |
 | -------- | ----------------------------------------------------------------- | ---------------------------------------------------- |
@@ -48,8 +48,9 @@ SDR pixels are linearised with the sRGB EOTF to `L_sdr`, multiplied by one scala
 | `heic10` | 10-bit HEVC Main10 (`nclx 9/16/9`)                                | Best compatibility (Windows / macOS / iOS / Android) |
 | `heic12` | 12-bit HEVC Main12 (`nclx 9/16/9`)                                | Highest depth, needs decoder support                 |
 | `avif`   | 12-bit AV1 4:4:4 (preferred; `nclx 9/16/9`)                       | Small files, web / sharing                           |
+| `jxl`    | 24-bit JPEG XL, fixed PQ + BT.2020 (`--override_bitdepth=24`)     | High-bit-depth lossless master, needs cjxl           |
 
-All five share **one gain curve**; only the container, bit depth and codec differ. The Ultra HDR gain map is half-resolution by default (`--gain-fullres` keeps it full-resolution), while the other formats are encoded from the same 16-bit intermediate.
+All six share **one gain curve**; only the container, bit depth and codec differ. The Ultra HDR gain map is half-resolution by default (`--gain-fullres` keeps it full-resolution), while the other formats are encoded from the same intermediate; JXL is fixed to PQ + BT.2020 and does not follow `--transfer` to HLG.
 
 ## What it solves
 
@@ -143,15 +144,18 @@ pip install -e .
 pip install -r requirements.txt
 ```
 
-Dependencies: `numpy`, `pillow`, `pillow-heif`. AVIF output needs `ffmpeg` with libaom-av1 on the system. Python 3.10+.
+Dependencies: `numpy`, `pillow`, `pillow-heif`. AVIF output needs `ffmpeg` with libaom-av1 on the system. 24-bit JXL needs `cjxl` 0.13+ (libjxl) on `PATH`, or set `HDRGAINMAP_CJXL` / `HDRGAINMAP_JXLINFO`; without cjxl only the jxl entry fails and other formats continue. Python 3.10+.
 
 ## Usage
 
 ### Common commands
 
 ```bash
-# Default: all five formats, quality 100, DPI from the source
+# Default: all six formats, quality 100, DPI from the source
 python -m hdrgainmap photo.png -o out
+
+# Only 24-bit JXL (fixed PQ + BT.2020)
+python -m hdrgainmap photo.png -o out -f jxl
 
 # Batch
 python -m hdrgainmap a.png b.jpg c.webp -o out --quiet
@@ -184,6 +188,7 @@ For an input called `{stem}`:
 | 10-bit HEIC       | `{stem}_hdr10_pq.heic`                                                 |
 | 12-bit HEIC       | `{stem}_hdr12_pq.heic`                                                 |
 | 12-bit AVIF       | `{stem}_hdr12_pq.avif`                                                 |
+| 24-bit JXL        | `{stem}_hdr24_pq.jxl` (fixed PQ + BT.2020)                             |
 | Debug (`--debug`) | `{stem}_emis.png`, `{stem}_gainmap.png`, `{stem}_gainmap_embedded.png` |
 
 ### Exit codes and batches
@@ -196,22 +201,22 @@ Batches run image by image in command-line order; one failure does not stop the 
 
 ### Options
 
-| Option           | Description                                                         |
-| ---------------- | ------------------------------------------------------------------- |
-| `-o, --outdir`   | Output directory, default `out`                                     |
-| `-f, --formats`  | Comma-separated: `jpeg` `png` `heic10` `heic12` `avif`, default all |
-| `-q, --quality`  | Lossy quality 50–100, default 100                                   |
-| `--dpi`          | Output DPI, default from the source                                 |
-| `--transfer`     | Transfer function `PQ` (default) / `HLG`                            |
-| `--alpha-bg`     | Composite colour for transparency: `black` (default) / `white`      |
-| `--gain-fullres` | Keep the gain map at full resolution (half by default)              |
-| `--validate`     | Validate every output after encoding; exit code 1 on failure        |
-| `--debug`        | Also write `_emis.png`, `_gainmap.png`, `_gainmap_embedded.png`     |
-| `--quiet`        | Suppress progress output                                            |
-| `--json`         | JSON output (paths + stats + validation)                            |
-| `--version`      | Print the version                                                   |
+| Option           | Description                                                               |
+| ---------------- | ------------------------------------------------------------------------- |
+| `-o, --outdir`   | Output directory, default `out`                                           |
+| `-f, --formats`  | Comma-separated: `jpeg` `png` `heic10` `heic12` `avif` `jxl`, default all |
+| `-q, --quality`  | Lossy quality 50–100, default 100                                         |
+| `--dpi`          | Output DPI, default from the source                                       |
+| `--transfer`     | Transfer function `PQ` (default) / `HLG`                                  |
+| `--alpha-bg`     | Composite colour for transparency: `black` (default) / `white`            |
+| `--gain-fullres` | Keep the gain map at full resolution (half by default)                    |
+| `--validate`     | Validate every output after encoding; exit code 1 on failure              |
+| `--debug`        | Also write `_emis.png`, `_gainmap.png`, `_gainmap_embedded.png`           |
+| `--quiet`        | Suppress progress output                                                  |
+| `--json`         | JSON output (paths + stats + validation)                                  |
+| `--version`      | Print the version                                                         |
 
-Option scope: `-q` affects JPEG/HEIC/AVIF only (PNG is always lossless); `--transfer` affects PNG/HEIC/AVIF, not the Ultra HDR SDR base; `--dpi` is written into every output's metadata; `--gain-fullres` affects only the Ultra HDR gain map; `--alpha-bg` only matters for sources with alpha.
+Option scope: `-q` affects JPEG/HEIC/AVIF only (PNG and JXL are always lossless); `--transfer` affects PNG/HEIC/AVIF, not the Ultra HDR SDR base, and JXL stays fixed at PQ + BT.2020; `--dpi` is written into every output's metadata (not JXL yet); `--gain-fullres` affects only the Ultra HDR gain map; `--alpha-bg` only matters for sources with alpha.
 
 A failure on one image does not stop a batch: each file is processed independently and the final exit code reports whether anything failed.
 
@@ -225,7 +230,7 @@ from hdrgainmap import build
 res = build(
     "photo.png",
     "out",
-    formats=("jpeg", "png", "heic12"),
+    formats=("jpeg", "png", "heic12", "jxl"),
     quality=100,
     transfer="PQ",
     alpha_bg=(0, 0, 0),
@@ -245,7 +250,8 @@ print(res["stats"]["peak_nits"], res["stats"]["untouched_pct"])
   "stats": {"gain_mean": 1.18, "gain_max": 2.05, "untouched_pct": 42.0,
             "gt2x_pct": 1.8, "peak_nits": 416.0, "base_reused": True},
   "timings": {"load": 0.8, "base": 0.0, "gain": 36.7, "hdr": 6.7,
-              "jpeg": 0.8, "png": 22.8, "heic12": 1.0, "avif": 4.2, "total": 74.0},
+              "jxl": 0.8, "jpeg": 0.8, "png": 22.8, "heic12": 1.0,
+              "avif": 4.2, "total": 75.0},
   "ok": True,
 }
 ```
@@ -279,6 +285,18 @@ heic10.encode(q16, transfer="PQ", bits=12, quality=100, dpi=240)
 avif.encode(q16, transfer="PQ", bits=12, quality=100, dpi=240)   # → (blob, bits)
 ```
 
+24-bit JXL bypasses q16: write a PFM (float32 code values) and hand it to cjxl:
+
+```python
+from pathlib import Path
+from hdrgainmap import jxl, pipeline
+
+pfm = Path("tmp.pfm")
+pipeline._write_pfm(rgb, gain, "PQ", pfm)
+jxl.encode(pfm, "out.jxl", "PQ")     # --override_bitdepth=24 -d 0
+pfm.unlink()
+```
+
 ## Colour and containers
 
 * **Source pixels are interpreted as sRGB.** Sources with an ICC profile are converted to sRGB first (Display-P3, Adobe RGB, CMYK and LAB are supported); if conversion fails, the original profile is kept. EXIF orientation is applied first, and alpha is composited over `--alpha-bg`.
@@ -286,6 +304,7 @@ avif.encode(q16, transfer="PQ", bits=12, quality=100, dpi=240)   # → (blob, bi
 * **PNG** writes `cICP = (9, 16, 0, 1)` (BT.2020 / PQ / RGB matrix / full range); HLG uses transfer 18. `matrix=0` is correct for RGB.
 * **HEIC** writes `nclx = (9, 16, 9)` (18 for HLG). **The matrix must be 9** (BT.2020 NCL); otherwise it falls back to 6 (BT.601) and some decoders invert the wrong matrix, shifting colours.
 * **AVIF**: the ffmpeg muxer writes no colour tags (always 2/2), so the `nclx` box is patched afterwards; DPI is added as an Exif item (`iloc` / `iinf` / `iref` plus a TIFF at the end of `mdat`, `infe` version 2).
+* **JXL** is fixed at 24-bit, PQ and BT.2020 (`Rec2100PQ`) and ignores `--transfer`. cjxl does not read PNG PQ tags, so PFM float32 carries the code values and `--override_bitdepth=24 -d 0` encodes losslessly, avoiding fake depth from relabelling 16-bit data. JXL does not write DPI yet.
 * **DPI**: PNG uses `pHYs`; HEIC uses EXIF 282/283/296; AVIF gets an Exif item. This makes Explorer show 240 dpi instead of 72.
 
 ### Ultra HDR: one JPEG, two pictures
@@ -334,12 +353,14 @@ Defaults are quality-first:
 * HEIC / AVIF quality 100 (AVIF uses AV1 `crf = (100-q)*0.63`, so 100 → crf 0);
 * AVIF prefers 4:4:4; 4:2:0 smears coloured highlights on line art; if 12-bit 4:4:4 fails it falls back to 4:2:0 or 10-bit;
 * PNG is lossless, zlib level 9;
+* JXL is 24-bit lossless (cjxl `-d 0 -e 7 --override_bitdepth=24`), fixed PQ + BT.2020;
 * the gain map is half-resolution by default: it is coded at full resolution in log2 space, then downscaled with LANCZOS, and dithered after scaling; `--gain-fullres` keeps it full-resolution (9.91 MB embedded JPEG at 70.2 MP in our test).
 
 Performance (6-core CPU, 17.8 MP / 5800×3066 reference):
 
 * Ultra HDR JPEG only: about 45 s, of which roughly 37 s is the gain computation;
-* 70.2 MP (12960×5420) for all five formats: about 7.5 minutes — gain 181 s, PNG 111 s, AVIF 89 s, HEIC 18 s; a full-resolution gain map adds about 20% to the Ultra HDR size;
+* 70.2 MP (12960×5420) for five formats (excluding JXL): about 7.5 minutes — gain 181 s, PNG 111 s, AVIF 89 s, HEIC 18 s; a full-resolution gain map adds about 20% to the Ultra HDR size;
+* 24-bit JXL: about 2.4 s for 1000×1700 (jxl 0.8 s), 9.3 MB; 70.2 MP in about 232 s (gain 153 s, hdr 25 s, jxl 51 s), 273 MB; the PFM is a temporary file of roughly pixels × 12 bytes (about 840 MB at 70 MP) deleted after encoding;
 * PNG dominates the rest: about 23 s at 17.8 MP;
 * HDR encoding runs in tiles (`tile_rows=2048`) so the full float32 image is not held at once;
 * every output is written atomically (temp file + `os.replace`), so a failure never leaves a truncated file.
@@ -349,22 +370,23 @@ At 100 MP-class sizes the PNG can reach a few hundred MB; allow enough memory. `
 ## Validation
 
 ```bash
-python -m hdrgainmap.validate out/x_hdr16_pq.png out/x_hdr10_pq.heic out/x_hdr12_pq.heic out/x_hdr12_pq.avif
+python -m hdrgainmap.validate out/x_hdr16_pq.png out/x_hdr10_pq.heic out/x_hdr12_pq.heic out/x_hdr12_pq.avif out/x_hdr24_pq.jxl
 ```
 
 * **PNG**: 16-bit RGB IHDR, `cICP` 9/16 or 9/18, pHYs, zlib length and filter-byte range, decodability;
 * **HEIC**: bit depth 10/12, `nclx` primaries=9, transfer 16/18, **matrix=9**, peak-code clipping;
 * **AVIF**: major brand, `nclx` (primaries=9, transfer 16/18, matrix=9), `pixi` depth, decodability;
-* **Ultra HDR**: two MPF entries, `hdrgm` parameters, gain-map decodability, and ISO 21496-1 field checks when present.
+* **Ultra HDR**: two MPF entries, `hdrgm` parameters, gain-map decodability, and ISO 21496-1 field checks when present;
+* **JXL**: container/codestream signature, 24-bit depth from `jxlinfo`, PQ/HLG transfer and Rec.2100 primaries; without jxlinfo it degrades to a signature check plus a warning.
 
 ## Tests
 
 ```bash
-python -m pytest                # 18 tests
+python -m pytest                # 19 tests
 python tests/test_roundtrip.py  # or run the script directly
 ```
 
-Coverage: PQ round-trip, adaptive parameters, full build of all five formats, both PNG decode paths agreeing pixel-for-pixel, HLG `cICP`, quality affecting size, EXIF orientation, alpha compositing, ICC→sRGB, tiled HDR encoding consistency, large-flat-area suppression, atomic writes, JPEG base reuse, API argument validation, debug gain-map output, and ISO 21496-1 big-endian layout/readability.
+Coverage: PQ round-trip, adaptive parameters, full build of all six formats, 24-bit JXL depth/colour checks, both PNG decode paths agreeing pixel-for-pixel, HLG `cICP`, quality affecting size, EXIF orientation, alpha compositing, ICC→sRGB, tiled HDR encoding consistency, large-flat-area suppression, atomic writes, JPEG base reuse, API argument validation, debug gain-map output, and ISO 21496-1 big-endian layout/readability.
 
 ## Known limits
 
@@ -375,6 +397,7 @@ Coverage: PQ round-trip, adaptive parameters, full build of all five formats, bo
 * **SDR fallback for HEIC/AVIF depends on the viewer**: the file contains only an HDR image, with no separate SDR base. Some Android 16 devices lift all PQ codes, so the SDR view looks overexposed while HDR is correct. This is a device mapping issue and is not compensated in the encoder.
 * **Heuristic boundaries**: very large flat bright surfaces may be under-boosted; noise in very dark images can be mistaken for sparkle; the model is not physically exact.
 * **AVIF is plain HDR AVIF**, not a gain-map tmap container; SDR fallback is left to the viewer.
+* **24-bit JXL has limited viewer support**: recent Chrome/Firefox can decode it; Windows Photos and Explorer may not. JXL does not write DPI yet and ignores `--transfer` (fixed PQ + BT.2020).
 * **No GPU acceleration**: the gain field and blurs run on the CPU with NumPy.
 
 ## Layout
@@ -388,7 +411,8 @@ hdr-gainmap/
 │  ├─ png16.py      16-bit PQ/HLG PNG encode/decode
 │  ├─ heic10.py     10/12-bit HEIC encode/decode (nclx 9/16/9)
 │  ├─ avif.py       12-bit AVIF encode/decode (ffmpeg/libaom, nclx and Exif DPI fixes)
-│  ├─ ultrahdr.py   Ultra HDR mux/parse (MPF + XMP hdrgm + optional ISO)
+│  ├─ jxl.py        24-bit JPEG XL (PFM → cjxl, fixed PQ + BT.2020)
+│  ├─ ultrahdr.py   Ultra HDR 1.1 mux/parse (MPF + XMP hdrgm + ISO 21496-1)
 │  ├─ validate.py   container compliance checks
 │  ├─ pipeline.py   end-to-end build
 │  └─ cli.py        command line
@@ -409,6 +433,7 @@ hdr-gainmap/
 * [google/libultrahdr](https://github.com/google/libultrahdr)
 * [PNG Third Edition (W3C Recommendation)](https://www.w3.org/TR/png-3/)
 * [AVIF specification](https://aomediacodec.github.io/av1-avif/)
+* [JPEG XL project and spec entry](https://jpeg.org/jpegxl/) and [libjxl](https://github.com/libjxl/libjxl) (ISO/IEC 18181-1/2)
 * [ITU-R BT.2408-9 (203-nit HDR reference white)](https://www.itu.int/dms_pub/itu-r/opb/rep/R-REP-BT.2408-9-2026-PDF-E.pdf)
 * Tariq & Chapiro, *Perceptually Adaptive Real-Time Tone Mapping*, 2023 ([paper](https://achapiro.github.io/Tar23/Tar23.pdf))
 * [gainmaps.com](https://www.gainmaps.com/)
@@ -418,7 +443,7 @@ hdr-gainmap/
 This project is released under the MIT License; see [LICENSE](LICENSE). Every third-party dependency and tool, with version and licence, is listed in [THIRD\_PARTY\_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 * Runtime dependencies: NumPy (BSD-3-Clause), Pillow (MIT-CMU), pillow-heif (BSD-3-Clause; its wheel bundles libheif LGPL-3.0, x265 GPL-2.0-or-commercial and libde265 LGPL-3.0).
-* External tools: FFmpeg (the local 9.1 full build enables GPL components and is used under GPLv3), libaom (BSD-style), SVT-AV1 (BSD-3-Clause Clear), x264/x265 (GPL-2.0).
+* External tools: FFmpeg (the local 9.1 full build enables GPL components and is used under GPLv3), libaom (BSD-style), SVT-AV1 (BSD-3-Clause Clear), x264/x265 (GPL-2.0), libjxl/cjxl (BSD-3-Clause).
 * This repository redistributes none of those binaries: FFmpeg is invoked through `subprocess`, and HEIC goes through pillow-heif/libheif. The project itself therefore remains MIT-licensed. If you redistribute a GPL FFmpeg build or a wheel bundling x265, you must provide the GPLv3/LGPL-3.0 licence texts and corresponding source.
 * No extra licence purchase is needed for the current use; the commercial x265 option only matters when you cannot accept the GPL terms and need closed-source redistribution.
 * The repository contains no third-party images; the example images were generated from a user-provided source, so confirm your rights to that source before redistributing it.

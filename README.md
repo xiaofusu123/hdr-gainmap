@@ -1,15 +1,15 @@
 ---
 title: hdr-gainmap 使用说明
 slug: hdr-gainmap
-summary: 把 8bit SDR 插画转成五种 HDR 封装，用自适应光传输模型只抬“在发光”的区域，默认质量优先并可校验。
-description: hdr-gainmap 不靠 AI 提亮，而是用光照场、扩散、环境光遮蔽与大面积白墙惩罚判断哪里在发光，再按同一条增益曲线生成 Ultra HDR JPEG、16bit PNG、10/12bit HEIC 和 12bit AVIF。默认 q100、PNG 无损、AVIF 优先 4:4:4，并内置容器合规校验。
+summary: 把 8bit SDR 插画转成六种 HDR 封装，用自适应光传输模型只抬“在发光”的区域，默认质量优先并可校验。
+description: hdr-gainmap 不靠 AI 提亮，而是用光照场、扩散、环境光遮蔽与大面积白墙惩罚判断哪里在发光，再按同一条增益曲线生成 Ultra HDR JPEG、16bit PNG、10/12bit HEIC、12bit AVIF 和 24bit JPEG XL。默认 q100、PNG/JXL 无损、AVIF 优先 4:4:4，并内置容器合规校验。
 ---
 
 **简体中文** | [English](README.en.md)
 
-**把 8bit SDR 插画转成 HDR 母版**：一条命令输出 Ultra HDR JPEG、16bit PNG、10/12bit HEIC 与 12bit AVIF，不设档位，增益参数按每张图自己的光影分布计算。
+**把 8bit SDR 插画转成 HDR 母版**：一条命令输出 Ultra HDR JPEG、16bit PNG、10/12bit HEIC、12bit AVIF 与 24bit JPEG XL，不设档位，增益参数按每张图自己的光影分布计算。
 
-**版本：Beta 0.1.1**。
+**版本：Beta 0.1.2**。
 
 ## 示例
 
@@ -31,15 +31,15 @@ HDR 预览单独放大：
 
 增益图默认半分辨率；解码时按 `gain = 2 ** (pixel / 255 * GainMapMax)` 还原，HDR 线性光 = SDR 线性光 × gain。
 
-## 原理：一条增益曲线，五种封装
+## 原理：一条增益曲线，六种封装
 
-SDR 像素按 sRGB EOTF 还原成线性光 `L_sdr`，乘同一个标量增益 `g`，得到 `L_hdr = g · L_sdr`；再转 BT.2020，按 PQ 或 HLG 编码。五种产物共用这条曲线，区别只是容器、色深与色度抽样，所以同一张图在五种格式里“哪里亮”是一致的。`g = 2 ** (gmax · em)`，`em ∈ [0, 1)`，增益范围是 `[1, 2**gmax)`；`gmax` 由图像自身的曝光分位数决定，不写死。
+SDR 像素按 sRGB EOTF 还原成线性光 `L_sdr`，乘同一个标量增益 `g`，得到 `L_hdr = g · L_sdr`；再转 BT.2020，按 PQ 或 HLG 编码。六种产物共用这条曲线，区别只是容器、色深与色度抽样，所以同一张图在六种格式里“哪里亮”是一致的。`g = 2 ** (gmax · em)`，`em ∈ [0, 1)`，增益范围是 `[1, 2**gmax)`；`gmax` 由图像自身的曝光分位数决定，不写死。
 
 * **PQ 是绝对亮度**：`L_hdr` 以 SDR 白 = 203 nits 为基准换算成 cd/m² 再编码。203 nits 在 PQ 码值上约 0.58，所以把 PQ 文件直接塞进 SDR 查看器会发灰——不是文件坏了，而是缺少 HDR 渲染链路。
 * **HLG 是相对信号**：SDR 白落在约 75%，显示端按自己的峰值做 OOTF（本工具按 1000 nits 峰值编码）。兼容 SDR 的 HLG 显示器能直接出图，代价是峰值不如 PQ 可控。
 * **Ultra HDR 不存第二张 HDR 图**：它是一张 8bit SDR 主图 + 一张 8bit 增益图。增益图在 log2 域归一化到 `[0, GainMapMax]`（本项目上限 1.45 EV），解码端按显示器 headroom 插值后乘回 SDR。输出遵循 Ultra HDR 1.1：XMP `hdrgm` 与 ISO 21496-1 同时写入；1.1 向下兼容 1.0。
 
-## 五种产物
+## 六种产物
 
 | 格式       | 色深 / 编码                                                 | 典型用途                              |
 | -------- | ------------------------------------------------------- | --------------------------------- |
@@ -48,8 +48,9 @@ SDR 像素按 sRGB EOTF 还原成线性光 `L_sdr`，乘同一个标量增益 `g
 | `heic10` | 10bit HEVC Main10（`nclx 9/16/9`）                        | 兼容性最好（Windows / macOS / iOS / 安卓） |
 | `heic12` | 12bit HEVC Main12（`nclx 9/16/9`）                        | 色深最高，需解码端支持                       |
 | `avif`   | 12bit AV1 4:4:4（优先；`nclx 9/16/9`）                       | 体积小，网页 / 分享                       |
+| `jxl`    | 24bit JPEG XL，固定 PQ + BT.2020（`--override_bitdepth=24`） | 高位深无损母版，需 cjxl                    |
 
-同一张图的五种产物共用**同一条增益曲线**，区别只在容器、色深与编码。Ultra HDR 的增益图默认半分辨率（可 `--gain-fullres` 改全分辨率），其余格式都是逐像素 16bit 中间量编码。
+同一张图的六种产物共用**同一条增益曲线**，区别只在容器、色深与编码。Ultra HDR 的增益图默认半分辨率（可 `--gain-fullres` 改全分辨率），其余格式都是逐像素中间量编码；JXL 固定 PQ + BT.2020，不跟随 `--transfer` 走 HLG。
 
 ## 它解决什么问题
 
@@ -143,15 +144,18 @@ pip install -e .
 pip install -r requirements.txt
 ```
 
-依赖 `numpy`、`pillow`、`pillow-heif`；生成 AVIF 需要系统里有 `ffmpeg`（带 libaom-av1）。Python 3.10+。
+依赖 `numpy`、`pillow`、`pillow-heif`；生成 AVIF 需要系统里有 `ffmpeg`（带 libaom-av1）。生成 24bit JXL 需要 `cjxl` 0.13+（libjxl），可放进 `PATH`，或用环境变量 `HDRGAINMAP_CJXL` / `HDRGAINMAP_JXLINFO` 指定路径；缺少 cjxl 时只让 jxl 这一项失败，其它格式照常。Python 3.10+。
 
 ## 用法
 
 ### 常用命令
 
 ```bash
-# 默认：五种格式全出，质量 100，DPI 沿用源图
+# 默认：六种格式全出，质量 100，DPI 沿用源图
 python -m hdrgainmap photo.png -o out
+
+# 只要 24bit JXL（固定 PQ + BT.2020）
+python -m hdrgainmap photo.png -o out -f jxl
 
 # 批量处理
 python -m hdrgainmap a.png b.jpg c.webp -o out --quiet
@@ -184,6 +188,7 @@ python -m hdrgainmap photo.png -o out --json --validate
 | 10bit HEIC     | `{stem}_hdr10_pq.heic`                                               |
 | 12bit HEIC     | `{stem}_hdr12_pq.heic`                                               |
 | 12bit AVIF     | `{stem}_hdr12_pq.avif`                                               |
+| 24bit JXL      | `{stem}_hdr24_pq.jxl`（固定 PQ + BT.2020）                               |
 | 调试图（`--debug`） | `{stem}_emis.png`、`{stem}_gainmap.png`、`{stem}_gainmap_embedded.png` |
 
 ### 退出码与批处理
@@ -199,7 +204,7 @@ python -m hdrgainmap photo.png -o out --json --validate
 | 参数               | 说明                                                      |
 | ---------------- | ------------------------------------------------------- |
 | `-o, --outdir`   | 输出目录，默认 `out`                                           |
-| `-f, --formats`  | 逗号分隔：`jpeg` `png` `heic10` `heic12` `avif`，默认全部         |
+| `-f, --formats`  | 逗号分隔：`jpeg` `png` `heic10` `heic12` `avif` `jxl`，默认全部   |
 | `-q, --quality`  | 有损编码质量 50–100，默认 100                                    |
 | `--dpi`          | 输出 DPI，默认沿用源图                                           |
 | `--transfer`     | 传递函数 `PQ`（默认）/ `HLG`                                    |
@@ -211,7 +216,7 @@ python -m hdrgainmap photo.png -o out --json --validate
 | `--json`         | JSON 输出（路径 + 统计 + 校验报告）                                 |
 | `--version`      | 打印版本                                                    |
 
-参数作用范围：`-q` 只影响 JPEG/HEIC/AVIF，PNG 始终无损；`--transfer` 影响 PNG/HEIC/AVIF，Ultra HDR 的 SDR 主图不变；`--dpi` 写入所有产物的元数据；`--gain-fullres` 只影响 Ultra HDR 增益图；`--alpha-bg` 只对带 alpha 的源生效。
+参数作用范围：`-q` 只影响 JPEG/HEIC/AVIF，PNG 与 JXL 始终无损；`--transfer` 影响 PNG/HEIC/AVIF，Ultra HDR 的 SDR 主图不变，JXL 固定 PQ + BT.2020；`--dpi` 写入所有产物的元数据（JXL 暂不写 DPI）；`--gain-fullres` 只影响 Ultra HDR 增益图；`--alpha-bg` 只对带 alpha 的源生效。
 
 单张图失败不会中断批量：每个文件独立处理，最后统一以退出码表示是否有失败。
 
@@ -225,7 +230,7 @@ from hdrgainmap import build
 res = build(
     "photo.png",
     "out",
-    formats=("jpeg", "png", "heic12"),
+    formats=("jpeg", "png", "heic12", "jxl"),
     quality=100,
     transfer="PQ",
     alpha_bg=(0, 0, 0),
@@ -245,7 +250,8 @@ print(res["stats"]["peak_nits"], res["stats"]["untouched_pct"])
   "stats": {"gain_mean": 1.18, "gain_max": 2.05, "untouched_pct": 42.0,
             "gt2x_pct": 1.8, "peak_nits": 416.0, "base_reused": True},
   "timings": {"load": 0.8, "base": 0.0, "gain": 36.7, "hdr": 6.7,
-              "jpeg": 0.8, "png": 22.8, "heic12": 1.0, "avif": 4.2, "total": 74.0},
+              "jxl": 0.8, "jpeg": 0.8, "png": 22.8, "heic12": 1.0,
+              "avif": 4.2, "total": 75.0},
   "ok": True,
 }
 ```
@@ -279,6 +285,18 @@ heic10.encode(q16, transfer="PQ", bits=12, quality=100, dpi=240)
 avif.encode(q16, transfer="PQ", bits=12, quality=100, dpi=240)   # → (blob, bits)
 ```
 
+24bit JXL 不经过 q16：先写 PFM（float32 码值），再交给 cjxl：
+
+```python
+from pathlib import Path
+from hdrgainmap import jxl, pipeline
+
+pfm = Path("tmp.pfm")
+pipeline._write_pfm(rgb, gain, "PQ", pfm)
+jxl.encode(pfm, "out.jxl", "PQ")     # --override_bitdepth=24 -d 0
+pfm.unlink()
+```
+
 ## 颜色与容器
 
 * **源像素按 sRGB 解释**；带 ICC 的源会先转到 sRGB（Display-P3、Adobe RGB、CMYK、LAB 都支持），转换失败则保留原样。EXIF 方向会先摆正，带 alpha 的图按 `--alpha-bg` 合成。
@@ -286,6 +304,7 @@ avif.encode(q16, transfer="PQ", bits=12, quality=100, dpi=240)   # → (blob, bi
 * **PNG** 写 `cICP = (9, 16, 0, 1)`（BT.2020 / PQ / RGB 矩阵 / 全范围），HLG 时 transfer 为 18；`matrix=0` 对 RGB 是正确的。
 * **HEIC** 写 `nclx = (9, 16, 9)`（HLG 为 18）；**matrix 必须是 9**（BT.2020 NCL）。不写会落成 6（BT.601），部分解码器按 601 反矩阵，颜色直接偏。
 * **AVIF** 的 ffmpeg muxer 不写色彩标签（一律 2/2），编码后改写 `nclx` 7 字节；DPI 通过补一个 Exif item（`iloc` / `iinf` / `iref` + `mdat` 尾部 TIFF，`infe` 必须 version 2）写入。
+* **JXL** 固定 24bit、PQ、BT.2020（`Rec2100PQ`），不跟随 `--transfer`；cjxl 不读 PNG 的 PQ 标记，所以用 PFM 的 float32 传码值，再 `--override_bitdepth=24 -d 0` 无损编码，避免“16bit 重标 24bit”的伪位深。JXL 暂不写 DPI。
 * **DPI**：PNG 写 `pHYs`；HEIC 借 EXIF 282/283/296；AVIF 补 Exif item。Explorer 面板才会显示 240 dpi 而不是 72。
 
 ### Ultra HDR：一张 JPEG，两幅画面
@@ -334,12 +353,14 @@ HDR  = (SDR + OffsetSDR) * gain - OffsetHDR
 * HEIC / AVIF 质量 100（AVIF 的 AV1 `crf = (100-q)*0.63`，100 → crf 0）；
 * AVIF 优先 4:4:4，插画色边锐利，4:2:0 会把彩色高光糊掉；若 12bit 4:4:4 失败会自动降级（4:2:0 或 10bit）；
 * PNG 无损，zlib level 9；
+* JXL 24bit 无损（cjxl `-d 0 -e 7 --override_bitdepth=24`），固定 PQ + BT.2020；
 * 增益图默认半分辨率：在 log2 域按全分辨率取码，再用 LANCZOS 缩小，抖动在缩放后生成；`--gain-fullres` 保持全分辨率（70.2MP 实测内嵌增益图 JPEG 9.91MB）。
 
 性能（6 核 CPU，17.8MP / 5800×3066 参考）：
 
 * 只出 Ultra HDR JPEG 约 45s，其中增益计算约 37s；
-* 70.2MP（12960×5420）出全五种格式约 7.5 分钟：gain 181s、PNG 111s、AVIF 89s、HEIC 18s；全分辨率增益图让 Ultra HDR 体积增加约两成；
+* 70.2MP（12960×5420）出五种格式（不含 JXL）约 7.5 分钟：gain 181s、PNG 111s、AVIF 89s、HEIC 18s；全分辨率增益图让 Ultra HDR 体积增加约两成；
+* 24bit JXL：1000×1700 约 2.4s（jxl 0.8s），9.3MB；70.2MP 约 232s（gain 153s、hdr 25s、jxl 51s），273MB；PFM 是临时文件，体积约为像素数 × 12 字节，70MP 时约 840MB，编码完即删；
 * PNG 是耗时大头，17.8MP 约 23s；
 * HDR 中间量按 `tile_rows=2048` 分块编码，避免整幅 `float32` 同时驻留；
 * 各产物原子写入（临时文件 + `os.replace`），中途失败不会留下半截文件。
@@ -349,22 +370,23 @@ HDR  = (SDR + OffsetSDR) * gain - OffsetHDR
 ## 校验
 
 ```bash
-python -m hdrgainmap.validate out/x_hdr16_pq.png out/x_hdr10_pq.heic out/x_hdr12_pq.heic out/x_hdr12_pq.avif
+python -m hdrgainmap.validate out/x_hdr16_pq.png out/x_hdr10_pq.heic out/x_hdr12_pq.heic out/x_hdr12_pq.avif out/x_hdr24_pq.jxl
 ```
 
 * **PNG**：IHDR 16bit RGB、`cICP` 9/16 或 9/18、pHYs、zlib 长度与滤波字节范围、能否解码；
 * **HEIC**：位深 10/12、`nclx` primaries=9、transfer 16/18、**matrix=9**、码值是否触顶；
 * **AVIF**：major brand、`nclx`（primaries=9、transfer 16/18、matrix=9）、`pixi` 位深、能否解码；
-* **Ultra HDR**：MPF 两条、`hdrgm` 参数、增益图可解码；ISO 21496-1 逐字段核对（主图存根、增益图完整载荷、与 XMP 交叉一致）。
+* **Ultra HDR**：MPF 两条、`hdrgm` 参数、增益图可解码；ISO 21496-1 逐字段核对（主图存根、增益图完整载荷、与 XMP 交叉一致）；
+* **JXL**：容器/码流签名、`jxlinfo` 读到的位深必须是 24、传递函数 PQ/HLG、原色 Rec.2100；没有 jxlinfo 时退化为签名检查并给出警告。
 
 ## 测试
 
 ```bash
-python -m pytest              # 18 个测试
+python -m pytest              # 19 个测试
 python tests/test_roundtrip.py  # 也可以直接跑脚本
 ```
 
-覆盖：PQ 编解码互逆、自适应参数随图变化、五种格式全量构建、PNG 两条解码路径逐像素一致、HLG 的 `cICP`、质量参数影响体积、EXIF 方向、alpha 合成、ICC→sRGB、分块 HDR 编码一致性、大面积白墙降权、原子写入、JPEG 主图复用、API 参数校验、调试增益图输出、ISO 21496-1 大端布局与可读性。
+覆盖：PQ 编解码互逆、自适应参数随图变化、六种格式全量构建、24bit JXL 位深/色彩校验、PNG 两条解码路径逐像素一致、HLG 的 `cICP`、质量参数影响体积、EXIF 方向、alpha 合成、ICC→sRGB、分块 HDR 编码一致性、大面积白墙降权、原子写入、JPEG 主图复用、API 参数校验、调试增益图输出、ISO 21496-1 大端布局与可读性。
 
 ## 已知限制
 
@@ -375,6 +397,7 @@ python tests/test_roundtrip.py  # 也可以直接跑脚本
 * **HEIC/AVIF 的 SDR 回退取决于查看器**：文件里只有一张 HDR 图，没有独立 SDR 基图；部分安卓 16 设备会把 PQ 码值整体抬高，此时 SDR 观感会过曝，而 HDR 显示正常。这是设备映射问题，未在编码端做“中间调压暗”补偿。
 * **启发式模型有边界**：超大面积的平亮表面可能被压得偏暗；极暗图上的噪点可能被当成细碎高光；它不追求物理正确的光传输。
 * **AVIF 是普通 HDR AVIF**，不是带增益图的 tmap 封装；SDR 回退同样交给查看器。
+* **24bit JXL 的查看器支持有限**：Chrome/Firefox 新版可解码，Windows 照片与资源管理器未必认 24bit；JXL 暂不写 DPI，也不跟 `--transfer` 走 HLG（固定 PQ + BT.2020）。
 * **无 GPU 加速**：增益场与模糊都在 CPU 上用 NumPy 完成。
 
 ## 目录
@@ -388,7 +411,8 @@ hdr-gainmap/
 │  ├─ png16.py      16bit PQ/HLG PNG 编解码
 │  ├─ heic10.py     10/12bit HEIC 编解码（nclx 9/16/9）
 │  ├─ avif.py       12bit AVIF 编解码（ffmpeg/libaom，补 nclx 与 Exif DPI）
-│  ├─ ultrahdr.py   Ultra HDR 封装/解析（MPF + XMP hdrgm + 可选 ISO）
+│  ├─ jxl.py        24bit JPEG XL（PFM → cjxl，固定 PQ + BT.2020）
+│  ├─ ultrahdr.py   Ultra HDR 1.1 封装/解析（MPF + XMP hdrgm + ISO 21496-1）
 │  ├─ validate.py   产物合规校验
 │  ├─ pipeline.py   一条龙构建
 │  └─ cli.py        命令行
@@ -409,6 +433,7 @@ hdr-gainmap/
 * [google/libultrahdr](https://github.com/google/libultrahdr)
 * [PNG 第三版（W3C Recommendation）](https://www.w3.org/TR/png-3/)
 * [AVIF 规范](https://aomediacodec.github.io/av1-avif/)
+* [JPEG XL 项目与规范入口](https://jpeg.org/jpegxl/) 与 [libjxl](https://github.com/libjxl/libjxl)（ISO/IEC 18181-1/2）
 * [ITU-R BT.2408-9（HDR 参考白 203 nits）](https://www.itu.int/dms_pub/itu-r/opb/rep/R-REP-BT.2408-9-2026-PDF-E.pdf)
 * Tariq & Chapiro, *Perceptually Adaptive Real-Time Tone Mapping*, 2023（[论文](https://achapiro.github.io/Tar23/Tar23.pdf)）
 * [gainmaps.com](https://www.gainmaps.com/)
@@ -418,7 +443,7 @@ hdr-gainmap/
 本项目以 MIT 发布，见 [LICENSE](LICENSE)。第三方依赖、工具、版本与许可证逐项列在 [THIRD\_PARTY\_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 * 运行依赖：NumPy（BSD-3-Clause）、Pillow（MIT-CMU）、pillow-heif（BSD-3-Clause；wheel 内含 libheif LGPL-3.0、x265 GPL-2.0/商业双许可、libde265 LGPL-3.0）。
-* 外部工具：FFmpeg（本机 9.1 full build 启用了 GPL 组件，按 GPLv3 使用）、libaom（BSD-style）、SVT-AV1（BSD-3-Clause Clear）、x264/x265（GPL-2.0）。
+* 外部工具：FFmpeg（本机 9.1 full build 启用了 GPL 组件，按 GPLv3 使用）、libaom（BSD-style）、SVT-AV1（BSD-3-Clause Clear）、x264/x265（GPL-2.0）、libjxl/cjxl（BSD-3-Clause）。
 * 本仓库不打包上述二进制：ffmpeg 通过 `subprocess` 调用，HEIC 通过 pillow-heif 使用 libheif。因此本项目自身仍按 MIT 发布；若二次分发 GPL 版 ffmpeg 或含 x265 的 wheel，需要按 GPLv3/LGPL-3.0 提供许可证文本与对应源码。
 * 当前使用方式不需要额外购买许可证；x265 的商业许可只在无法接受 GPL 条款、且需要闭源分发时才有必要。
 * 仓库不含第三方图片；示例图由用户提供的源图生成，公开分发前请确认源图使用权。

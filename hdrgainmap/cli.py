@@ -18,14 +18,15 @@ FORMAT_HELP = {
     "heic10": "10bit HEVC，兼容性最好",
     "heic12": "12bit HEVC，色深最高（Windows 需 HEVC 扩展）",
     "avif": "12bit AV1，体积最小",
+    "jxl": "24bit JPEG XL（PQ + BT.2020，无损，需要 cjxl）",
 }
 
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="hdrgainmap",
-        description="把 8bit SDR 插画转成 HDR 母版：Ultra HDR JPEG / 16bit PNG / 10bit & 12bit HEIC / 12bit AVIF。",
-        epilog="例：python -m hdrgainmap a.png b.jpg -o out -f jpeg,png,heic10,heic12,avif",
+        description="把 8bit SDR 插画转成 HDR 母版：Ultra HDR JPEG / 16bit PNG / 10bit & 12bit HEIC / 12bit AVIF / 24bit JPEG XL。",
+        epilog="例：python -m hdrgainmap a.png b.jpg -o out -f jpeg,png,heic10,heic12,avif,jxl",
     )
     p.add_argument("src", nargs="+", help="源图路径（PNG/JPEG 等，可带 alpha），可一次给多张")
     p.add_argument("-o", "--outdir", default="out", help="输出目录（默认 out）")
