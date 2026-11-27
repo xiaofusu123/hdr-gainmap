@@ -1,7 +1,6 @@
 """命令行入口：python -m hdrgainmap <源图...> [-o 输出目录] [选项]。
 
-不设"档位"：增益参数按每张图的亮度分布自动计算；
-用户只需要选输出格式和质量。支持一次处理多张图。
+不设档位：增益参数按每张图自动计算；支持一次处理多张图。
 """
 from __future__ import annotations
 
@@ -13,11 +12,11 @@ from . import __version__
 from .pipeline import FORMATS, QUALITY, build
 
 FORMAT_HELP = {
-    "jpeg": "Ultra HDR JPEG（主图 + 增益图 + MPF + XMP + ISO 21496-1），安卓原生",
-    "png": "16bit 无损母版（PQ/HLG，cICP 9/16/0/1）",
+    "jpeg": "Ultra HDR JPEG（全分辨率 RGB 增益图 + MPF + XMP + 三通道 ISO 21496-1）",
+    "png": "16bit 无损母版（PQ + BT.2020，cICP 9/16/0/1）",
     "heic10": "10bit HEVC，兼容性最好",
     "heic12": "12bit HEVC，色深最高（Windows 需 HEVC 扩展）",
-    "avif": "12bit AV1，体积最小",
+    "avif": "12bit AV1 4:4:4，体积最小",
     "jxl": "24bit JPEG XL（PQ + BT.2020，无损，需要 cjxl）",
 }
 
@@ -35,12 +34,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("-q", "--quality", type=int, default=QUALITY, choices=range(50, 101),
                    metavar="50-100", help=f"有损编码质量（默认 {QUALITY}）")
     p.add_argument("--dpi", type=float, default=None, help="输出 DPI（默认沿用源图）")
-    p.add_argument("--transfer", default="PQ", choices=["PQ", "HLG"],
-                   help="传递函数（默认 PQ）")
     p.add_argument("--alpha-bg", default="black", choices=["black", "white"],
                    help="透明图合成底色（默认 black）")
-    p.add_argument("--gain-fullres", action="store_true",
-                   help="增益图保持全分辨率（默认半分辨率）")
     p.add_argument("--validate", action="store_true",
                    help="生成后对每个产物跑一遍合规校验")
     p.add_argument("--debug", action="store_true",
@@ -55,9 +50,7 @@ def _run_one(args, src: str, alpha_bg: tuple[int, int, int], log) -> dict:
     """处理一张图；校验结果也合并进返回值。"""
     formats = tuple(s.strip().lower() for s in args.formats.split(",") if s.strip())
     res = build(src, args.outdir, formats=formats, quality=args.quality,
-                dpi=args.dpi, transfer=args.transfer, debug=args.debug,
-                alpha_bg=alpha_bg,
-                gain_fullres=args.gain_fullres, log=log)
+                dpi=args.dpi, debug=args.debug, alpha_bg=alpha_bg, log=log)
     if args.validate:
         from . import validate
         reports = {}
@@ -73,7 +66,7 @@ def _run_one(args, src: str, alpha_bg: tuple[int, int, int], log) -> dict:
 def _print_human(res: dict, args, reports: dict) -> None:
     s = res["stats"]
     print(f"源图   : {res['src']}")
-    print(f"参数   : gmax={res['gmax']:.2f} EV（按光影自适应）  dpi={res['dpi']:g}"
+    print(f"参数   : gmax={res['gmax']:.2f} EV（按光场自适应）  dpi={res['dpi']:g}"
           f"  {res['transfer']}  质量 {args.quality}")
     print(f"增益   : 均值 {s['gain_mean']:.2f}×  最大 {s['gain_max']:.2f}×  "
           f"不动 {s['untouched_pct']:.1f}%  >2× {s['gt2x_pct']:.1f}%")

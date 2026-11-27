@@ -1,21 +1,8 @@
-"""自适应增益图：只抬"发光体"，阈值按每张图自己的光影分布走。
+"""增益图：光场 → 发光权重 emis → 每通道增益。
 
-判据
-----
-`lit`     受光区域：用大尺度邻域均值估计光照分布，灯光照到的地方整片抬起；
-`spark`   细碎高光：局部比周围明显突起的像素（星芒、亮点、小光斑）；
-`white`   绝对白：接近纯白的镜面/灯芯，补上相对判据在核心处的空档；
-`area`    大面积平亮区惩罚：白墙、天空这类"整片都亮"的表面不该整片吃增益；
-`halo`    把核心向外扩一圈做 bloom，避免硬边；
-`finalize` 软拐点归一：让最亮的 0.1% 恰好用满量程。
-
-为什么阈值要自适应
------------------
-固定阈值在不同曝光的图上必然出错：夜景里 0.6 已是很亮的高光，白天的白墙
-也是 0.9。参照局部适应亮度做阈值（Chapiro, "Perceptually Adaptive Real-Time
-Tone Mapping", 2023：适应亮度取金字塔更高层，阈值随适应亮度缩放），这里用
-图像自身的亮度分位数代替：99 分位往下一点作为门槛，99.9 分位作为饱和点。
-这样暗图阈值自然低、亮图阈值自然高，不需要按素材类型分档。
+判据：lit（受光）、spark（细碎高光）、irr（辐照度）、ao（遮蔽）、
+white（绝对白）、area（大面积平亮惩罚）；阈值取亮度分位数（Chapiro 2023）。
+``channel_weights()`` 从光色给 R/G/B 权重，按 BT.709 亮度归一。
 """
 from __future__ import annotations
 
@@ -68,11 +55,10 @@ def _dpi_of(im: Image.Image) -> float:
 def prepare_image(path: str | Path, *, alpha_bg: tuple[int, int, int] = (0, 0, 0),
                   auto_orient: bool = True, convert_icc: bool = True
                   ) -> tuple[np.ndarray, Image.Image, dict]:
-    """读图 → (float32 [0,1] 的 sRGB 数组, 处理后的 RGB 图, 元信息)。
+    """读图 → (sRGB float32 数组, 处理后图像, 元信息)。
 
-    处理顺序：EXIF 方向 → alpha 合成 → 非 sRGB ICC 转到 sRGB。
-    元信息里的 ``reusable_source`` 表示"像素没有被改动过"，只有这时才能
-    让 Ultra HDR 主图直接复用源 JPEG 字节，否则 SDR 主图与增益图会错位。
+    顺序：EXIF 转正 → alpha 合成 → ICC 转 sRGB。``reusable_source`` 为真才允许
+    复用源 JPEG 字节（像素未被改动）。
     """
     src = Path(path)
     im = Image.open(path)
@@ -139,11 +125,7 @@ def load_rgb(path: str | Path, **kwargs) -> tuple[np.ndarray, Image.Image]:
 
 
 def _box(a: np.ndarray, r: int) -> np.ndarray:
-    """均值模糊（可分离，累加和实现），边界复制。
-
-    用 float32 累加：17.8MP 上误差 ~4e-5，远小于 8bit 增益码的 1/255；
-    内存带宽减半，大半径模糊快 ~1.5×。前缀和只保留一份，避免 vstack/hstack 复制。
-    """
+    """均值模糊（可分离累加和，边界复制）。float32 足够：17.8MP 误差约 4e-5。"""
     if r < 1:
         return a
     p = np.pad(a, r, mode="edge")
@@ -182,81 +164,60 @@ def luma(rgb: np.ndarray) -> np.ndarray:
     return (0.2126 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.0722 * lin[..., 2]).astype(np.float32)
 
 
-def adapt_params(rgb: np.ndarray, y: np.ndarray | None = None) -> dict:
-    """按这张图自己的亮度分布算出判据参数。
+def adapt_params(rgb: np.ndarray, y: np.ndarray | None = None,
+                 scene=None) -> dict:
+    """按这张图自己的亮度分布算判据参数（兼容入口）。
 
-    t ∈ [0,1] 表示整体曝光：0 = 夜景（大面积深色），1 = 高调（整片都亮）。
-    受光阈值不在这里定，而是由 emissive() 对 illumination 场取 38–99 分位；
-    这里只调曝光相关强度（gmax / 泛光 / 受光权重），保证同一套参数适应不同夜景与高调图。
+    实际计算在 light.adapt()：与光场共用一份场景统计。这里保留旧签名，内部转调。
     """
+    from .light import adapt, analyze
     if y is None:
         y = luma(rgb)
-    p50 = float(np.percentile(y, 50))
-    t = float(np.clip(p50 / 0.60, 0.0, 1.0))
-
-    cfg = dict(BASE_CFG)
-    cfg["halo"] = round(0.16 - 0.06 * t, 3)      # 泛光占比：暗 0.16 → 亮 0.10（只做柔化，不铺底）
-    cfg["hr"] = max(1, round(3 - 2 * t))         # 泛光半径：暗 3px → 亮 1px
-    # 峰值收敛：最亮的点（中心光斑）压到旧版的一部分；不再做整体抬升
-    cfg["gmax"] = round(min((2.2 - 0.6 * t) * PEAK_SCALE, GMAX_CAP), 3)
-    # 受光区域抬多少：高调图少抬（本来就亮），低调图多抬；细碎高光另算
-    cfg["base_lit"] = round(0.78 - 0.16 * t, 3)
-    cfg["base_spark"] = 0.45
-    cfg["base_irr"] = 0.45        # 光传播/漫反射场权重
-    cfg["base_amb"] = 0.10        # 全局光照/环境光底噪（暗部也会有一点点）
-    cfg["i0"], cfg["i1"] = 0.35, 0.85
-    cfg["lift"] = 1.0             # 不再整体抬升：只抬"被照到的地方"
-    return cfg
+    if scene is None:
+        scene = analyze(rgb, y)
+    return adapt(y, scene)
 
 
 def emissive(rgb: np.ndarray, cfg: dict,
-             y: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+             y: np.ndarray | None = None, scene=None) -> tuple[np.ndarray, np.ndarray]:
     """返回 (亮度 Y, 发光权重 emis)，均在 [0,1]。
 
-    判据分四层，主要用大尺度平滑量，避免"同样亮的两块地方一块亮一块不亮"：
-      1) 受光区域：用 ~1/25 图宽的邻域均值估计这张图的光照分布，取它的
-         38–99 分位做平滑阈值 —— 灯光照到的地方整片抬起，暗部不动；
-      2) 细碎高光：星芒、亮点、小光斑这类"比周围明显突起"的像素额外加一层；
-      3) 面积惩罚：如果一大片区域都被判为"受光"，那更可能是白墙/天空/平亮
-         表面，而不是发光体，按面积平滑地压低权重（细碎高光可豁免）；
-      4) 绝对白：接近纯白的镜面/灯芯补一点权重，填上相对判据在核心处的空档。
+    五层判据：受光区域（导引滤波保边）、细碎高光、光场辐照度、大面积平亮惩罚、
+    绝对白。主要用大尺度平滑量，避免"同样亮的两块地方一块亮一块不亮"。
     """
+    from .light import analyze, guided_filter
+
     if y is None:
         y = luma(rgb)
+    if scene is None:
+        scene = analyze(rgb, y)
     h, w = y.shape
     r_illum = max(8, min(h, w) // 25)
-    illum = _gauss(y, r_illum)
-    # 阈值区间要足够宽：窄区间会让平滑渐变上出现"等值线圈"，白布上就是一圈明显的光圈
+    # 以亮度为引导保边平滑（纯高斯会糊掉光斑边缘）
+    illum = guided_filter(y, _gauss(y, r_illum), max(1, r_illum // 2), eps=1e-3)
+    # 阈值区间要够宽，否则渐变处出现等值线圈
     lo, hi = (float(np.percentile(illum, q)) for q in (38, 99))
     lit = _smoothstep(lo, max(hi, lo + 1e-3), illum)          # 被照到的整片区域
     peak = y / (_gauss(y, cfg["pr"]) + 1e-4)
     spark = _smoothstep(cfg["p0"], cfg["p1"], peak)           # 细碎高光
 
-    # 大面积平亮区惩罚：area 是 lit 的低频铺开程度；spark 强的点光源只罚 30%，
-    # 因为"小光点"和"大片白墙"在低频面积上是可分的。
+    # 面积惩罚：低频面积大 = 白墙/天空；spark 强的点光源只罚 30%
     r_area = max(8, min(h, w) // 8)
     area = _gauss(lit, r_area)
     penalty = (cfg["area_pen"] * _smoothstep(cfg["area_lo"], cfg["area_hi"], area)
                * (1.0 - 0.7 * spark))
     lit = lit * (1.0 - penalty)
 
-    # 光的传播/衍射/漫反射：光从高光源向外扩散、随距离衰减，再乘表面反射率。
-    # 这一层让"光球照到的地方"也拿到增益，而不是只有光源本身亮。
-    from .light import irradiance
-    irr = _smoothstep(cfg["i0"], cfg["i1"], irradiance(y))
+    # 光传播：定向光束 + 扩散 + 空间透视
+    irr = _smoothstep(cfg["i0"], cfg["i1"], scene.irradiance)
 
-    # 全局光照 + 环境光遮蔽：远离光源的暗部也吃一点环境光，但凹缝/被遮挡处更少
-    r_small = max(4, min(h, w) // 60)
+    # 环境光：凹缝处更少（AO 来自光场模块）
     r_big = max(12, min(h, w) // 20)
-    near = _gauss(y, r_small)
     far = _gauss(y, r_big)
-    ao = np.clip((near + 0.02) / (far + 0.02), 0.45, 1.0) ** 0.9   # 遮蔽近似：局部比大范围暗 = 凹缝
-    env = _smoothstep(0.02, 0.45, far) * ao
+    env = _smoothstep(0.02, 0.45, far) * np.clip(scene.ao, 0.45, 1.0)
     amb = cfg["base_amb"] * env
 
-    # 纯白高光（镜面/白布最亮处）要整片吃增益：只靠 relative peak 会在亮斑边缘
-    # 形成一圈"光环"（核心比值≈1 不触发、边缘触发），补一个绝对亮度项把中心填上；
-    # 大面积白墙已被 penalty 压过，这里不再重复加。
+    # 纯白高光补绝对判据，填掉亮斑中心不触发相对峰值判据的空档
     white = _smoothstep(0.92, 1.0, y) * (1.0 - penalty)
     emis = (cfg["base_lit"] * lit + cfg["base_irr"] * irr
             + cfg["base_spark"] * spark + cfg["base_white"] * white + amb)
@@ -264,24 +225,29 @@ def emissive(rgb: np.ndarray, cfg: dict,
     return y, np.clip(emis, 0.0, 1.0).astype(np.float32)
 
 
-def finalize(emis: np.ndarray) -> np.ndarray:
-    """平滑饱和到 (0,1)：用指数逼近而不是硬截断。
+def channel_weights(rgb: np.ndarray, y: np.ndarray | None = None,
+                    scene=None) -> np.ndarray:
+    """光源颜色 → R/G/B 权重，按 BT.709 亮度归一（白光 = 1,1,1）。"""
+    from .light import analyze
+    if scene is None:
+        if y is None:
+            y = luma(rgb)
+        scene = analyze(rgb, y)
+    lc = np.clip(np.asarray(scene.light_color, dtype=np.float32), 0.25, 4.0)
+    w = np.clip(lc ** 0.6, 0.80, 1.25)
+    lum = float(0.2126 * w[0] + 0.7152 * w[1] + 0.0722 * w[2])
+    return (w / max(lum, 1e-6)).astype(np.float32)
 
-    硬截断会在亮部内部造出一块"顶到 1.0 的平台"，平台与渐变的交界就是肉眼可见的
-    等值线光圈（白布上那一圈）。指数饱和处处连续可导，最亮处也只是趋近 1，
-    不会再出现平台边界。
-    """
+
+def finalize(emis: np.ndarray) -> np.ndarray:
+    """指数饱和到 (0,1)，避免硬截断在亮部造出平台与等值线光圈。"""
     p = float(np.percentile(emis, 99.9)) or 1.0
     em = 1.0 - np.exp(-emis / max(p, 1e-6) * 1.6)
     return _gauss(em, 2)
 
 
 def gain_of(emis: np.ndarray, gmax: float, lift: float = 1.0) -> np.ndarray:
-    """发光权重 → 线性增益倍数。
-
-    lift 是整体抬升（所有像素都乘），gmax 只作用于发光权重：
-    中间调（皮肤、衣料）整体略亮，而最亮的点相对收敛。
-    """
+    """发光权重 → 线性增益；lift 整体抬升，gmax 只作用于发光权重。"""
     # 高光增益要扣掉整体抬升的部分：整体已经抬了 lift 倍，高光只需再补 (b - lift + 1)，
     # 这样整体变亮的同时，高光与中调的差距反而被压缩（用户要的"减少差距"）。
     b = 2.0 ** (gmax * emis)

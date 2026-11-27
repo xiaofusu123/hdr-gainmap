@@ -1,18 +1,8 @@
-"""一条龙：源图 → 自适应增益 → 各格式的 HDR 母版。
+"""一条龙：源图 → 光场 → 分通道增益 → 各格式的 HDR 母版。
 
-输出格式（不分档位，全部按图自适应）：
-  jpeg    Ultra HDR JPEG（主图 + 增益图 + MPF + XMP + ISO 21496-1），安卓原生
-  png     16bit PQ/HLG，无损母版
-  heic10  10bit HEVC Main10，兼容性最好
-  heic12  12bit HEVC Main12，色深最高
-  avif    12bit AV1，体积最小
-  jxl     24bit JPEG XL，高位深无损母版（需要 cjxl）
-
-所有编码器默认质量 100；颜色统一走 BT.2020 + PQ（或 HLG），
-HEIC/AVIF 写 nclx 9/16(PQ) 或 18(HLG)/9，PNG 写 cICP 9/16/0/1。
-
-大图内存策略：BT.2020 + PQ/HLG 编码按行分块，增益图在降采样后的尺寸上
-量化并抖动，避免为亿像素图同时保留多份 float32 全分辨率副本。
+jpeg Ultra HDR（MPF + XMP + ISO 21496-1）、png 16bit PQ、
+heic10/12 HEVC Main10/12、avif 12bit AV1、jxl 24bit JPEG XL。
+统一 BT.2020 + PQ；HDR 按行分块编码，增益图全分辨率 RGB、量化前抖动。
 """
 from __future__ import annotations
 
@@ -26,12 +16,13 @@ import numpy as np
 from PIL import Image
 
 from . import color, gainmap, heic10, jxl, png16, ultrahdr
+from . import light
 
 FORMATS = ("jpeg", "png", "heic10", "heic12", "avif", "jxl")
 QUALITY = 100
-HLG_PEAK_NITS = 1000.0
 JPEG_SUFFIXES = {".jpg", ".jpeg", ".jpe", ".jfif"}
 SDR_WHITE_NITS = heic10.SDR_WHITE_NITS
+TRANSFER = "PQ"
 
 _SRGB_ICC: bytes | None = None
 
@@ -65,11 +56,7 @@ def _write_atomic(path: Path, blob: bytes) -> None:
 
 def _prepare_base(src: Path, im: Image.Image, dpi: float, quality: int,
                   reusable: bool) -> tuple[bytes, bool]:
-    """返回 (8bit JPEG 字节, 是否复用了源文件字节)。
-
-    只有源本来就是 JPEG、且像素没被方向/alpha/ICC 改动过、DPI 也没变时才复用
-    原始字节，SDR 部分逐字节不变；否则用给定质量重编码（subsampling=0，避免色边被糊）。
-    """
+    """返回 (8bit JPEG 字节, 是否复用源文件字节)。复用条件：源为 JPEG 且像素/DPI 未变。"""
     if reusable and src.suffix.lower() in JPEG_SUFFIXES:
         try:
             with Image.open(src) as probe:
@@ -95,59 +82,55 @@ def _source_dpi(im: Image.Image) -> float:
     return 96.0
 
 
-def _hdr_band(rgb: np.ndarray, gain: np.ndarray, transfer: str) -> tuple[np.ndarray, float]:
-    """一块 RGB + 增益 → BT.2020 PQ/HLG 的浮点码值（0..1），并返回峰值 nits。
-
-    PQ 用绝对亮度（×203 nits）；HLG 是相对信号，1.0 对应 1000 nits 峰值，
-    SDR 白落在 ~0.75，所以要先除以峰值再编码。24bit JXL 与 16bit 母版共用
-    这一份换算，保证两种位深的码值来自同一条曲线。
-    """
-    lin = color.srgb_to_linear(rgb) * gain[..., None]
-    hdr2020 = color.to_bt2020(lin)
-    if transfer == "HLG":
-        code = color.hlg_oetf(hdr2020, HLG_PEAK_NITS / SDR_WHITE_NITS)
-    else:
-        code = color.pq_oetf(hdr2020 * SDR_WHITE_NITS)
-    return np.clip(code, 0.0, 1.0).astype(np.float32), float(lin.max()) * SDR_WHITE_NITS
+def _channel_terms(rgb: np.ndarray, emis: np.ndarray, gmax: float,
+                   weights: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """返回 (线性 RGB, 每通道 log2 增益)。tint 按像素色相微调，再按亮度归一。"""
+    lin = color.srgb_to_linear(rgb)
+    lum = np.maximum(0.2126 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.0722 * lin[..., 2],
+                     1e-4)
+    tint = np.clip((lin / lum[..., None]) ** 0.35, 0.85, 1.15)
+    w = tint * weights.astype(np.float32)
+    w /= (0.2126 * w[..., 0] + 0.7152 * w[..., 1] + 0.0722 * w[..., 2])[..., None]
+    return lin, (gmax * emis[..., None] * w).astype(np.float32)
 
 
-def _hdr_code(rgb: np.ndarray, gain: np.ndarray, transfer: str,
+def _hdr_band(rgb: np.ndarray, emis: np.ndarray, gmax: float,
+              weights: np.ndarray) -> tuple[np.ndarray, float]:
+    """一块 RGB + emis → BT.2020 PQ 码值（0..1），返回峰值 nits。"""
+    lin, expo = _channel_terms(rgb, emis, gmax, weights)
+    hdr = color.to_bt2020(lin * np.exp2(expo)) * SDR_WHITE_NITS
+    return np.clip(color.pq_oetf(hdr), 0.0, 1.0).astype(np.float32), float(hdr.max())
+
+
+def _hdr_code(rgb: np.ndarray, emis: np.ndarray, gmax: float, weights: np.ndarray,
               *, tile_rows: int = 2048) -> tuple[np.ndarray, float]:
-    """线性 BT.709 光 → BT.2020 PQ/HLG 的 uint16 码值；按行分块控制内存。"""
-    h, w, _ = rgb.shape
-    out = np.empty((h, w, 3), dtype=np.uint16)
+    """BT.709 线性光 → BT.2020 PQ 的 uint16 码值；按行分块控制内存。"""
+    h = rgb.shape[0]
+    out = np.empty(rgb.shape, dtype=np.uint16)
     peak = 0.0
     for y0 in range(0, h, tile_rows):
         y1 = min(h, y0 + tile_rows)
-        code, band_peak = _hdr_band(rgb[y0:y1], gain[y0:y1], transfer)
+        code, band_peak = _hdr_band(rgb[y0:y1], emis[y0:y1], gmax, weights)
         peak = max(peak, band_peak)
         out[y0:y1] = np.clip(np.round(code * 65535.0), 0, 65535).astype(np.uint16)
     return out, peak
 
 
-def _write_pfm(rgb: np.ndarray, gain: np.ndarray, transfer: str, path: Path,
-               *, tile_rows: int = 2048) -> None:
-    """写 PFM 给 cjxl：float32 能无损装下 24bit 码值。
-
-    cjxl 不读 PNG 的 PQ/HLG 标记，PFM 则允许显式指定 Rec.2100 色彩编码；
-    PFM 规定行序自下而上，所以按块写入时要翻转行。
-    """
+def _write_pfm(rgb: np.ndarray, emis: np.ndarray, gmax: float, weights: np.ndarray,
+               path: Path, *, tile_rows: int = 2048) -> None:
+    """写 PFM 给 cjxl：float32 能无损装下 24bit 码值；行序自下而上。"""
     h, w, _ = rgb.shape
     with open(path, "wb") as fh:
         fh.write(f"PF\n{w} {h}\n-1.0\n".encode("ascii"))
         for y1 in range(h, 0, -tile_rows):
             y0 = max(0, y1 - tile_rows)
-            code, _ = _hdr_band(rgb[y0:y1], gain[y0:y1], transfer)
+            code, _ = _hdr_band(rgb[y0:y1], emis[y0:y1], gmax, weights)
             fh.write(np.ascontiguousarray(code[::-1]).astype("<f4").tobytes())
 
 
 def _save_gain_debug(gain: np.ndarray, path: Path, gmax_meta: float,
                      *, tile_rows: int = 2048) -> None:
-    """把全分辨率增益写成 8bit 可视化 PNG（log2 域，0..255 对应 0..gmax_meta）。
-
-    分块处理，避免为调试图再分配一份全尺寸 float32；码值与 JPEG 内嵌增益图
-    采用同一套 log2 归一化，可以直接对照，区别只是这里不降采样、不加抖动。
-    """
+    """把全分辨率增益写成 8bit 可视化 PNG（log2 域，与内嵌增益图同一套归一化）。"""
     h, w = gain.shape
     out = np.empty((h, w), dtype=np.uint8)
     denom = max(float(gmax_meta), 1e-6)
@@ -160,20 +143,12 @@ def _save_gain_debug(gain: np.ndarray, path: Path, gmax_meta: float,
 
 def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMATS,
           quality: int = QUALITY, dpi: float | None = None,
-          transfer: str = "PQ", debug: bool = False,
+          debug: bool = False,
           lift: float | None = None, peak_scale: float | None = None,
-          embed_icc: bool = True, gain_fullres: bool = False,
-          gain_rgb: bool = False, gain_scale: float = 1.0,
-          iso_flags: int = 0x40,
-          invert_gain: bool = False, alpha_bg: tuple[int, int, int] = (0, 0, 0),
+          embed_icc: bool = True, iso_flags: int = 0x40,
+          alpha_bg: tuple[int, int, int] = (0, 0, 0),
           tile_rows: int = 2048, log=None) -> dict:
-    """按格式生成 HDR 母版，返回产物路径与统计。
-
-    lift / peak_scale 用于试调：只覆盖其中一个时，就是"只整体抬"或"只压峰值"。
-    alpha_bg 是透明图合成时的底色；log 是可选的进度回调（接收一行文本）。
-    Ultra HDR 按 1.1 同时写 XMP 与 ISO 21496-1；单个格式失败不会中断其它格式，
-    错误收在 result["errors"] 里。
-    """
+    """按格式生成 HDR 母版，返回文件、统计与耗时。lift / peak_scale 供试调。"""
     t_start = time.perf_counter()
     timings: dict[str, float] = {}
 
@@ -194,9 +169,6 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
         raise ValueError(f"未知格式：{', '.join(sorted(unknown))}；可选 {', '.join(FORMATS)}")
     if not 1 <= int(quality) <= 100:
         raise ValueError(f"quality 必须在 1–100，收到 {quality}")
-    transfer = transfer.upper()
-    if transfer not in ("PQ", "HLG"):
-        raise ValueError(f"transfer 必须是 PQ 或 HLG，收到 {transfer}")
     if dpi is not None and float(dpi) <= 0:
         raise ValueError(f"dpi 必须为正数，收到 {dpi}")
 
@@ -219,31 +191,31 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
         t0 = mark("base", t0)
     del im
 
-    # 1) 按图自适应参数 → 发光权重 → 线性增益
-    notify("分析光影分布 …")
+    # 1) 光场分析一次，自适应参数 / 发光权重 / 光色共用
+    notify("分析光场 …")
     y = gainmap.luma(rgb)
-    cfg = gainmap.adapt_params(rgb, y=y)
+    scene = light.analyze(rgb, y)
+    cfg = gainmap.adapt_params(rgb, y=y, scene=scene)
     if lift is not None:
         cfg["lift"] = float(lift)
     if peak_scale is not None:
-        # gmax 已按 PEAK_SCALE 压过；这里还原后按调用方给的比例重新压
         cfg["gmax"] = round(cfg["gmax"] / gainmap.PEAK_SCALE * float(peak_scale), 3)
-    _, emis = gainmap.emissive(rgb, cfg, y=y)
+    _, emis = gainmap.emissive(rgb, cfg, y=y, scene=scene)
     del y
     emis = gainmap.finalize(emis)
     gain = gainmap.gain_of(emis, cfg["gmax"], cfg["lift"])
+    w_light = gainmap.channel_weights(rgb, scene=scene)
     t0 = mark("gain", t0)
 
-    # 2) 重建 HDR 线性光并编码。增益图不落盘参与，PNG/HEIC/AVIF 三份产物
-    #    逐像素来自同一份 q16。
-    notify("编码 BT.2020 + " + transfer + " …")
-    q16, peak_nits = _hdr_code(rgb, gain, transfer, tile_rows=tile_rows)
+    # 2) 重建 HDR 线性光并编码。PNG/HEIC/AVIF 三份产物逐像素来自同一份 q16。
+    notify("编码 BT.2020 + PQ …")
+    q16, peak_nits = _hdr_code(rgb, emis, cfg["gmax"], w_light, tile_rows=tile_rows)
     t0 = mark("hdr", t0)
 
     result: dict = {
         "src": str(src),
         "dpi": dpi,
-        "transfer": transfer,
+        "transfer": TRANSFER,
         "gmax": cfg["gmax"],
         "files": {},
         "errors": {},
@@ -276,11 +248,10 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
                                             dir=str(outdir))
             os.close(fd)
             pfm_path = Path(pfm_name)
-            # JXL 固定 PQ + BT.2020：24bit 母版不跟随 --transfer 走 HLG。
             tmp_jxl = outdir / f".{stem}.pq.tmp.jxl"
             try:
-                _write_pfm(rgb, gain, "PQ", pfm_path, tile_rows=tile_rows)
-                jxl.encode(pfm_path, tmp_jxl, "PQ")
+                _write_pfm(rgb, emis, cfg["gmax"], w_light, pfm_path, tile_rows=tile_rows)
+                jxl.encode(pfm_path, tmp_jxl, "PQ", dpi=dpi)
                 path = outdir / f"{stem}_hdr24_pq.jxl"
                 os.replace(tmp_jxl, path)
             finally:
@@ -293,45 +264,42 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
             t0 = mark("jxl", t0)
         except Exception as exc:                 # noqa: BLE001
             fail("jxl", exc)
-    del rgb
 
     if "jpeg" in formats:
         try:
             notify("编码 Ultra HDR JPEG …")
-            # 增益图要表达的是"最终增益"（含整体抬升与高光压缩），不是发光权重：
-            # ISO 解码端按 gain = 2^(GainMapMax * code) 还原，这里把 target gain 反解成码值，
-            # 并按实际最大增益写元数据，保证手机与 PNG/HEIC/AVIF 走同一条曲线。
-            gmax_meta = float(np.log2(max(float(gain.max()), 1.0)))
-            h, w = gain.shape
-            # 质量优先：先在 log 域按全分辨率取码，再用 LANCZOS 降到半分辨率。
-            # 如果先对增益做双线性降采样，高光边缘的码值会被插值磨平，半分辨率增益图会发糊。
-            code = np.clip(np.log2(np.maximum(gain, 1e-6)) / max(gmax_meta, 1e-6), 0.0, 1.0)
-            if not gain_fullres:
-                code = np.asarray(
-                    Image.fromarray(code, mode="F").resize(
-                        (max(1, w // 2), max(1, h // 2)), Image.LANCZOS),
-                    dtype=np.float32)
-            # 8bit 增益图 + 大面积平滑渐变会出现等值线状"光圈"（马赫带），
-            # 量化前加 ±0.5 LSB 的三角分布抖动把它打散，肉眼不可见但能消除环。
+            h, w = emis.shape
+            # 两遍：先求每通道最大对数增益，再按通道归一化写码值（全分辨率 RGB 增益图）
+            expo_max = np.zeros(3, dtype=np.float64)
+            for y0 in range(0, h, tile_rows):
+                y1 = min(h, y0 + tile_rows)
+                _, expo = _channel_terms(rgb[y0:y1], emis[y0:y1], cfg["gmax"], w_light)
+                expo_max = np.maximum(expo_max, expo.reshape(-1, 3).max(axis=0))
+            expo_max = np.maximum(expo_max, 1e-4)
+
+            # 8bit 增益图 + 平滑渐变的等值线圈用 ±0.5 LSB 三角抖动打散
             rng_a = np.random.default_rng(20261125)
             rng_b = np.random.default_rng(7)
-            dither = (rng_a.random(code.shape, dtype=np.float32)
-                      - rng_b.random(code.shape, dtype=np.float32))
-            gm_px = np.clip(code * 255.0 * float(gain_scale) + dither, 0, 254.0)
-            del code, dither
-            if invert_gain:
-                gm_px = 255.0 - gm_px
-            gm = Image.fromarray(gm_px.astype(np.uint8))
+            gm_px = np.empty((h, w, 3), dtype=np.uint8)
+            for y0 in range(0, h, tile_rows):
+                y1 = min(h, y0 + tile_rows)
+                _, expo = _channel_terms(rgb[y0:y1], emis[y0:y1], cfg["gmax"], w_light)
+                code = np.clip(expo / expo_max, 0.0, 1.0) * 255.0
+                code += (rng_a.random(code.shape, dtype=np.float32)
+                         - rng_b.random(code.shape, dtype=np.float32))
+                gm_px[y0:y1] = np.clip(code, 0.0, 254.0).astype(np.uint8)
+            gm = Image.fromarray(gm_px, "RGB")
             del gm_px
             if debug:
-                # 与 JPEG 内嵌的那张增益图逐像素一致（含缩放与抖动），便于对照。
                 gm.save(outdir / f"{stem}_gainmap_embedded.png")
-            if gain_rgb:
-                gm = gm.convert("RGB")
             gm_buf = io.BytesIO()
-            gm.save(gm_buf, "JPEG", quality=quality, optimize=True)
+            gm.save(gm_buf, "JPEG", quality=quality, subsampling=0, optimize=True)
+            gmax_meta = float(expo_max.max())
+            gmax_channels = tuple(float(v) for v in expo_max)
             result["gmax_meta"] = gmax_meta
+            result["gmax_channels"] = gmax_channels
             blob = ultrahdr.build(base_jpeg, gm_buf.getvalue(), gmax=gmax_meta,
+                                  gmax_channels=gmax_channels,
                                   dpi=dpi, icc=_srgb_icc() if embed_icc else None,
                                   iso_flags=iso_flags)
             path = outdir / f"{stem}_ultrahdr.jpeg"
@@ -341,13 +309,13 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
             t0 = mark("jpeg", t0)
         except Exception as exc:                 # noqa: BLE001
             fail("jpeg", exc)
-    del gain
+    del rgb, gain, emis
 
     if "png" in formats:
         try:
             notify("编码 16bit PNG …")
-            path = outdir / f"{stem}_hdr16_{transfer.lower()}.png"
-            _write_atomic(path, png16.encode(q16, dpi=dpi, transfer=transfer))
+            path = outdir / f"{stem}_hdr16_pq.png"
+            _write_atomic(path, png16.encode(q16, dpi=dpi, peak_nits=peak_nits))
             result["files"]["png"] = str(path)
             t0 = mark("png", t0)
         except Exception as exc:                 # noqa: BLE001
@@ -358,8 +326,8 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
             continue
         try:
             notify(f"编码 {bits}bit HEIC …")
-            path = outdir / f"{stem}_hdr{bits}_{transfer.lower()}.heic"
-            _write_atomic(path, heic10.encode(q16, transfer=transfer, bits=bits,
+            path = outdir / f"{stem}_hdr{bits}_pq.heic"
+            _write_atomic(path, heic10.encode(q16, bits=bits,
                                               quality=quality, dpi=dpi))
             result["files"][key] = str(path)
             t0 = mark(key, t0)
@@ -370,9 +338,8 @@ def build(src: str | Path, outdir: str | Path, formats: tuple[str, ...] = FORMAT
         try:
             from . import avif as avifmod
             notify("编码 12bit AVIF …")
-            blob, bits = avifmod.encode(q16, transfer=transfer, bits=12,
-                                        quality=quality, dpi=dpi)
-            path = outdir / f"{stem}_hdr{bits}_{transfer.lower()}.avif"
+            blob, bits = avifmod.encode(q16, bits=12, quality=quality, dpi=dpi)
+            path = outdir / f"{stem}_hdr{bits}_pq.avif"
             _write_atomic(path, blob)
             result["files"]["avif"] = str(path)
             result["stats"]["avif_bits"] = bits

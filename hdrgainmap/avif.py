@@ -1,12 +1,7 @@
-"""AVIF（AV1 still image）封装：借 ffmpeg 编码，再自己补 nclx 色彩标签。
+"""AVIF（AV1 still）封装：ffmpeg 编码，再改写 colr/nclx。
 
-为什么不用 ffmpeg 直接写：ffmpeg 9.x 的 `avif` muxer 会把 `colr/nclx` 写成
-`primaries=2, transfer=2`（unspecified），即使命令行给了 `-color_primaries bt2020
--color_trc smpte2084`。对这些字段来说等于没写，播放器只能靠猜。这里在编码后
-定位 `nclx` box 直接改写 7 个字节，成本几乎为零。
-
-12bit：libaom-av1 支持 `yuv420p12le`（profile 2）。SVT-AV1 的常用构建只到 10bit，
-所以 12bit 先用 libaom，失败再退 10bit（libsvtav1 更快）。
+ffmpeg 的 avif muxer 把 nclx 写成 primaries=2/transfer=2（unspecified），
+所以编码后定位 nclx box 改写 7 字节。12bit 用 libaom（profile 2），10bit 可退 SVT-AV1。
 """
 from __future__ import annotations
 
@@ -39,10 +34,7 @@ def _run(cmd: list[str], raw: bytes, out_path: Path) -> None:
 
 def _encode_once(q16: np.ndarray, out_path: Path, transfer: str, bits: int,
                  codec: str, crf: int, cpu_used: int, chroma: str = "444") -> None:
-    """跑一次 ffmpeg：rgb48 原始帧 → BT.2020 非恒定亮度 → yuv{444,420}p{10,12} → AVIF。
-
-    颜色矩阵在 scale 滤镜里完成，避免 ffmpeg 默认按 BT.601 转换导致偏色。
-    """
+    """跑一次 ffmpeg：rgb48 → BT.2020 NCL → yuv{444,420}p{10,12} → AVIF。"""
     h, w, _ = q16.shape
     pix_fmt = f"yuv{chroma}p{bits}le"
     cmd = [
@@ -157,12 +149,7 @@ def _build_iloc(ver: int, entries: list[dict], off_size: int, len_size: int,
 
 
 def add_exif_dpi(blob: bytes, dpi: float | None) -> bytes:
-    """给 AVIF 塞一个 Exif item，让资源管理器/看图软件能读到 DPI。
-
-    ffmpeg 的 avif muxer 不写 Exif，Windows 面板就会退回默认 72 dpi。这里手工构造
-    `infe(Exif)` + `iloc` + `iref(cdsc)`，数据追加到文件末尾，meta 变大后把已有
-    item 的绝对偏移整体平移。
-    """
+    """补一个 Exif item 让查看器读到 DPI；同时平移已有 item 的绝对偏移。"""
     if not dpi or dpi <= 0:
         return blob
     top = {t: (s, hl, e) for t, s, hl, e in _iter_boxes(blob, 0, len(blob))}
@@ -273,10 +260,7 @@ def ispe_size(blob: bytes) -> tuple[int, int]:
 
 
 def decode(blob: bytes) -> np.ndarray:
-    """AVIF → rgb48 数组（BT.2020 矩阵反变换，含 4:2:0 上采样）。
-
-    AVIF 是 ISOBMFF，ffmpeg 需要可 seek 的输入，所以走临时文件而不是管道。
-    """
+    """AVIF → rgb48 数组（BT.2020 反矩阵，含 4:2:0 上采样）。"""
     if not available():
         raise RuntimeError("找不到 ffmpeg，无法解码 AVIF")
     w, h = ispe_size(blob)
@@ -299,12 +283,7 @@ def decode(blob: bytes) -> np.ndarray:
 def encode(q16: np.ndarray, transfer: str = "PQ", bits: int = 12, quality: int = 100,
            cpu_used: int = 6, chroma: str = "444",
            dpi: float | None = None) -> tuple[bytes, int]:
-    """q16 (h,w,3) → AVIF 字节。返回 (blob, 实际位深)。
-
-    默认 12bit 4:4:4（AV1 profile 2）：插画色边锐利，4:2:0 会把彩色高光糊掉。
-    12bit 失败时依次退 4:2:0 12bit → 10bit 4:4:4 → 10bit 4:2:0。
-    quality 100 → crf 0（视觉无损），90 → crf 6，80 → crf 13。
-    """
+    """q16 → AVIF 字节，返回 (blob, 实际位深)。默认 12bit 4:4:4，失败逐级降级。"""
     if not available():
         raise RuntimeError("找不到 ffmpeg，无法生成 AVIF")
     transfer = transfer.upper()

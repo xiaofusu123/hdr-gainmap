@@ -1,28 +1,11 @@
 """Ultra HDR JPEG 封装与解析（MPF + XMP hdrgm 1.0 + ISO 21496-1）。
 
-文件结构（与 libultrahdr 的写盘顺序一致）::
+写盘顺序：SOI、APP0 JFIF、APP1 Exif、APP2 ISO（主图 4 字节存根）、APP2 MPF、
+APP1 XMP（主图）、主图数据；随后是增益图的 SOI、APP1 XMP、APP2 ISO（141 字节）、
+增益图数据。
 
-    SOI
-    APP0 JFIF            ← 源图若有则原样保留在最前
-    APP1 Exif            ← 只写 Software / ImageDescription
-    APP2 ISO (主图)      ← 命名空间 + 两个 u16 版本号（4 字节存根，大端）
-    APP2 MPF             ← 两条 16 字节条目，定位增益图
-    APP1 XMP (主图)      ← GContainer 目录 + hdrgm:Version
-    <主图其余段 + 熵编码 + EOI>
-    SOI + APP1 XMP (增益图)  ← 完整 hdrgm 参数
-        + APP2 ISO (增益图)  ← 61 字节完整元数据（单通道，大端）
-        + 增益图熵编码 + EOI
-
-三条硬约束（对应 libultrahdr `hasValidMpfAssociation()`）：
-
-* 主条目 ``attr & 0x0fffffff == 0x00030000``、``offset == 0``；
-* 增益图条目 ``attr & 0x0fffffff == 0``、``size == 增益图总长``，
-  且 ``offset`` **相对 MPF TIFF 头**而不是文件起点；
-* 主图长度 ↔ 增益图偏移必须迭代到不动点（XMP 里的 Item:Length 会改变长度）。
-
-元数据分工：主图 XMP 带 GContainer 目录 + 完整 hdrgm 参数；增益图自己的 XMP
-也带一份完整 hdrgm 参数（部分解析器只读增益图的）。ISO 21496-1 则主图只写
-版本存根、增益图写完整元数据。
+三条硬约束：主条目 attr==0x00030000 且 offset 0；增益图 offset 相对 MPF TIFF 头；
+主图长度与增益图偏移迭代到不动点。XMP 单通道回退，ISO 承载三通道。
 """
 from __future__ import annotations
 
@@ -41,7 +24,7 @@ CONTAINER_NS = "http://ns.google.com/photos/1.0/container/"
 ITEM_NS = "http://ns.google.com/photos/1.0/container/item/"
 
 DEFAULT_OFFSET = 1.0 / 64.0
-SOFTWARE = "hdr-gainmap 0.1.2b1"
+SOFTWARE = "hdr-gainmap 0.2.0b1"
 
 # MPF 段总长：marker(2)+length(2)+签名(4)+TIFF(4 字节序 + 4 IFD 偏移 + 42 IFD + 32 条目) = 90
 _MPF_SEG_LEN = 90
@@ -114,12 +97,7 @@ def _fmt(v: float) -> str:
 
 
 def _xmp_primary(gain_len: int, gmax: float, offset: float) -> str:
-    """主图 XMP：GContainer 目录 + hdrgm 参数（元素写法，与 v1.0 一致）。
-
-    参数以子元素形式给出（<hdrgm:GainMapMax>…</hdrgm:GainMapMax>），而不是
-    rdf:Description 的属性：元素写法在荣耀/Android 16 上显示正常，改成属性写法后
-    高光出现黑斑，故这里保持元素写法。
-    """
+    """主图 XMP：GContainer 目录 + hdrgm 参数（元素写法，属性写法在部分设备黑高光）。"""
     g = _fmt(gmax)
     off = _fmt(offset)
     return (
@@ -173,8 +151,7 @@ def _hdrgm_elements(g: str, off: str) -> str:
 def _frac(v: float, denom: int = 100_000_000) -> bytes:
     """有符号分数（s32 分子 + u32 分母，大端）；ISO 元数据里的 N/D 对。
 
-    ISO 21496-1 的 APP2 载荷按网络字节序（大端）存放；早期版本误用小端，
-    解码端会把 0.89387586 读成 75 左右，表现就是高光区域发黑。
+    必须大端：小端会让 0.89387586 被读成 75 左右，高光发黑。
     """
     return struct.pack(">iI", int(round(float(v) * denom)), denom)
 
@@ -186,12 +163,7 @@ def _frac_u(v: float, denom: int = 100_000_000) -> bytes:
 
 def _iso_metadata(gmax: float, offset: float, base_headroom: float = 0.0,
                   flags: int = 0x40) -> bytes:
-    """61 字节单通道 ISO 21496-1 元数据（大端，min/writer 版本 0）。
-
-    所有值都在 log2 域：headroom 与 gain map min/max 直接写 XMP 的
-    ``HDRCapacity*`` / ``GainMap*`` 数值，不要先取 2 的幂。
-    分母统一用 1e8，与 XMP 的 8 位小数逐位对齐（差值 0）。
-    """
+    """61 字节单通道 ISO 21496-1（大端）。值都在 log2 域，分母 1e8。"""
     out = struct.pack(">HHB", 0, 0, flags)
     out += _frac_u(base_headroom)                  # base headroom = 0/1e8
     out += _frac_u(gmax)                           # alternate headroom = GainMapMax
@@ -201,6 +173,23 @@ def _iso_metadata(gmax: float, offset: float, base_headroom: float = 0.0,
     out += _frac(offset)                           # base offset
     out += _frac(offset)                           # alternate offset
     assert len(out) == 61, len(out)
+    return out
+
+
+def _iso_metadata_channels(gmax: tuple[float, float, float], offset: float,
+                           base_headroom: float = 0.0,
+                           flags: int = 0xC0) -> bytes:
+    """141 字节三通道 ISO 21496-1（flags 0x80|0x40）。每通道 min/max/gamma/offset。"""
+    out = struct.pack(">HHB", 0, 0, flags)
+    out += _frac_u(base_headroom)
+    out += _frac_u(max(gmax))
+    for g in gmax:
+        out += _frac(0.0)
+        out += _frac(g)
+        out += struct.pack(">II", 1, 1)
+        out += _frac(offset)
+        out += _frac(offset)
+    assert len(out) == 141, len(out)
     return out
 
 
@@ -237,11 +226,7 @@ def _split_app0(jpeg: bytes) -> tuple[bytes, bytes]:
 
 
 def strip_metadata(jpeg: bytes) -> bytes:
-    """去掉旧的 Exif / XMP / MPF / ISO 段，保留 ICC、JFIF、APP13 等。
-
-    复用源 JPEG 字节时必须先剥掉这些段：否则会出现两份 Exif、两份 XMP，
-    解码器可能读到旧的增益图参数。
-    """
+    """去掉旧 Exif/XMP/MPF/ISO 段，保留 ICC、JFIF、APP13。"""
     if not jpeg.startswith(b"\xff\xd8"):
         raise ValueError("不是 JPEG（缺少 SOI）")
     out = bytearray(b"\xff\xd8")
@@ -278,15 +263,10 @@ def strip_metadata(jpeg: bytes) -> bytes:
 def build(primary: bytes, gain_jpeg: bytes, gmax: float = 2.0,
           offset: float = DEFAULT_OFFSET, software: str = SOFTWARE,
           iso_flags: int = 0x40,
+          gmax_channels: tuple[float, float, float] | None = None,
           description: str | None = None, dpi: float | None = None,
           icc: bytes | None = None) -> bytes:
-    """把 SDR 主图与增益图 JPEG 封装成 Ultra HDR 1.1 JPEG。
-
-    ``primary`` 是完整的 8bit JPEG（SOI 开头）；会先剥掉旧的 Exif/XMP/MPF/ISO 再封装，
-    其余字节（DQT/SOF/DHT/SOS + 熵数据）原样保留——源图本身是 JPEG 时即零重编码。
-    按 Ultra HDR 1.1 同时写 XMP ``hdrgm`` 与 ISO 21496-1：主图放 4 字节版本存根，
-    增益图放完整元数据。1.1 向下兼容 1.0，因此不再提供 XMP-only 模式。
-    """
+    """封装成 Ultra HDR JPEG；给 gmax_channels 时 ISO 写三通道 141 字节。"""
     if not primary.startswith(b"\xff\xd8"):
         raise ValueError("主图必须是 JPEG")
     if not gain_jpeg.startswith(b"\xff\xd8"):
@@ -305,8 +285,10 @@ def build(primary: bytes, gain_jpeg: bytes, gmax: float = 2.0,
         icc_seg = _seg(0xE2, ICC_ID + b"\x01\x01" + icc)
     exif = _seg(0xE1, _exif(software, description, dpi))
     iso_stub = _seg(0xE2, ISO_NS + struct.pack(">HH", 0, 0))
+    iso_payload = (_iso_metadata_channels(gmax_channels, offset, flags=iso_flags | 0x80)
+                   if gmax_channels else _iso_metadata(gmax, offset, flags=iso_flags))
     gain_head = (_seg(0xE1, XMP_NS + _xmp_gainmap(gmax, offset).encode("utf-8"))
-                 + _seg(0xE2, ISO_NS + _iso_metadata(gmax, offset, flags=iso_flags)))
+                 + _seg(0xE2, ISO_NS + iso_payload))
     gain_body = gain[2:]
     gain_total = 2 + len(gain_head) + len(gain_body)
 
@@ -454,7 +436,29 @@ def parse(blob: bytes) -> dict:
             info["offset_sdr"] = float(gm["OffsetSDR"])
         if "OffsetHDR" in gm:
             info["offset_hdr"] = float(gm["OffsetHDR"])
+        iso = info["iso_gainmap"]
+        chans = _iso_gmax_channels(iso) if iso else None
+        if chans:
+            info["gmax_channels"] = chans
+            info["gmax"] = max(chans)
     return info
+
+
+def _iso_gmax_channels(payload: bytes) -> tuple[float, float, float] | None:
+    """从 ISO 21496-1 载荷读三通道 gain_map_max；单通道或残缺返回 None。"""
+    import struct
+    if not payload.startswith(ISO_NS):
+        return None
+    body = payload[len(ISO_NS):]
+    if len(body) < 141 or not (body[4] & 0x80):
+        return None
+    out = []
+    for i in range(3):
+        base = 5 + 16 + 40 * i
+        num = struct.unpack_from(">I", body, base + 8)[0]
+        den = struct.unpack_from(">I", body, base + 12)[0]
+        out.append(num / den if den else 0.0)
+    return tuple(out)  # type: ignore[return-value]
 
 
 def read_gainmap(blob: bytes) -> bytes:
@@ -468,16 +472,18 @@ def read_gainmap(blob: bytes) -> bytes:
 # --------------------------------------------------------------------------- 增益应用
 
 
-def reconstruct(sdr_linear, gain_norm, gmax: float, offset: float = DEFAULT_OFFSET):
-    """按规范把归一化增益图应用到线性 SDR：``(S+off)·2^(gmax·g) − off``。
-
-    gain_norm 是 [0,1] 的恢复度（已解码、已放大到主图尺寸）；g=0 时结果严格等于 SDR。
-    """
+def reconstruct(sdr_linear, gain_norm, gmax, offset_sdr: float = DEFAULT_OFFSET,
+                offset_hdr: float = DEFAULT_OFFSET):
+    """按规范把归一化增益应用到线性 SDR：``(S+off_s)·2^(gmax·g) − off_h``。"""
     import numpy as np
     g = np.asarray(gain_norm, dtype=np.float32)
     s = np.asarray(sdr_linear, dtype=np.float32)
-    boost = np.exp2(gmax * g)
-    return np.clip((s + offset) * boost[..., None] - offset, 0.0, None).astype(np.float32)
+    if np.ndim(gmax) == 0:
+        boost = np.exp2(float(gmax) * g)
+    else:
+        gm = np.asarray(gmax, dtype=np.float32).reshape(1, 1, -1)
+        boost = np.exp2(gm * g)
+    return np.clip((s + offset_sdr) * boost - offset_hdr, 0.0, None).astype(np.float32)
 
 
 def peak_nits(gain_norm, sdr_linear, gmax: float, white_nits: float,

@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hdrgainmap import gainmap                       # noqa: E402
 from hdrgainmap import ultrahdr, validate            # noqa: E402
-from hdrgainmap.pipeline import _hdr_code, _write_atomic, build  # noqa: E402
+from hdrgainmap.pipeline import (                     # noqa: E402
+    _channel_terms, _hdr_code, _write_atomic, build)
 
 
 def test_orientation_applied(tmp_path: Path) -> None:
@@ -81,14 +82,25 @@ def test_hdr_code_tiles_match() -> None:
     """按行分块编码必须与整图编码逐码值一致。"""
     rng = np.random.default_rng(3)
     rgb = rng.random((9, 7, 3), dtype=np.float32)
-    gain = 1.0 + rng.random((9, 7), dtype=np.float32)
-    q_tiled, peak_tiled = _hdr_code(rgb, gain, "PQ", tile_rows=2)
-    q_full, peak_full = _hdr_code(rgb, gain, "PQ", tile_rows=1000)
+    emis = rng.random((9, 7), dtype=np.float32)
+    w = np.array([1.08, 1.0, 0.90], dtype=np.float32)
+    q_tiled, peak_tiled = _hdr_code(rgb, emis, 1.2, w, tile_rows=2)
+    q_full, peak_full = _hdr_code(rgb, emis, 1.2, w, tile_rows=1000)
     assert np.array_equal(q_tiled, q_full)
     assert abs(peak_tiled - peak_full) < 1e-3
+    assert q_tiled.shape == rgb.shape
 
-    q_hlg, _ = _hdr_code(rgb, gain, "HLG", tile_rows=3)
-    assert q_hlg.shape == rgb.shape
+
+def test_channel_terms_keep_luminance() -> None:
+    """分通道权重按亮度归一：加权亮度增益仍等于 2^(gmax·emis)。"""
+    rng = np.random.default_rng(11)
+    rgb = rng.random((6, 5, 3), dtype=np.float32)
+    emis = rng.random((6, 5), dtype=np.float32)
+    w = np.array([1.08, 1.0, 0.90], dtype=np.float32)
+    _, expo = _channel_terms(rgb, emis, 1.2, w)
+    lum_gain = (0.2126 * np.exp2(expo[..., 0]) + 0.7152 * np.exp2(expo[..., 1])
+                + 0.0722 * np.exp2(expo[..., 2]))
+    assert np.allclose(lum_gain, np.exp2(1.2 * emis), rtol=0.01)
 
 
 def test_large_flat_region_penalised() -> None:
@@ -134,7 +146,7 @@ def test_build_reuses_source_jpeg(tmp_path: Path) -> None:
 
 def test_build_argument_validation(tmp_path: Path) -> None:
     """API 入口先校验参数，避免半途失败留下半套产物。"""
-    bad = ({"formats": ("bmp",)}, {"quality": 0}, {"transfer": "SRGB"}, {"dpi": 0})
+    bad = ({"formats": ("bmp",)}, {"quality": 0}, {"dpi": 0})
     for kwargs in bad:
         with pytest.raises(ValueError):
             build(tmp_path / "x.png", tmp_path / "out", **kwargs)
@@ -156,7 +168,7 @@ def test_debug_outputs_gainmaps(tmp_path: Path) -> None:
     embedded = Image.open(out / "light_gainmap_embedded.png")
     assert gain.mode == "L" and gain.size == (size, size)
     assert emis.size == (size, size)
-    assert embedded.size == (size // 2, size // 2)
+    assert embedded.mode == "RGB" and embedded.size == (size, size)
     assert np.asarray(gain).max() > 0
 
 
@@ -178,6 +190,51 @@ def test_iso_payload_spec_layout() -> None:
     assert parsed["base_offset0"] == pytest.approx(0.015625)
 
 
+def test_iso_three_channel_layout() -> None:
+    """三通道载荷 141 字节：5 头 + 2 组头度 + 3×40，flags 0xC0。"""
+    payload = ultrahdr._iso_metadata_channels((0.9, 1.2, 0.7), 0.015625)
+    assert len(payload) == 141
+    assert payload[4] == 0xC0
+
+    parsed = validate.parse_iso(ultrahdr.ISO_NS + payload)
+    assert parsed is not None and parsed["channels"] == 3
+    assert parsed["alt_headroom"] == pytest.approx(1.2)
+    for i, ch in enumerate((0.9, 1.2, 0.7)):
+        assert parsed[f"max{i}"] == pytest.approx(ch)
+        assert parsed[f"base_offset{i}"] == pytest.approx(0.015625)
+
+
+def test_ultrahdr_reconstruction_matches_png(tmp_path: Path) -> None:
+    """JPEG 三通道增益图重建的 HDR 应与 PNG 母版一致（8bit 量化误差内）。"""
+    import io
+
+    from hdrgainmap import png16
+    from hdrgainmap.color import pq_eotf, srgb_to_linear, to_bt2020
+
+    src = tmp_path / "src.png"
+    img = np.full((80, 120, 3), 24, np.uint8)
+    img[20:60, 40:90] = 235
+    img[10:25, 95:110] = (250, 180, 90)
+    Image.fromarray(img, "RGB").save(src)
+
+    res = build(src, tmp_path / "out", formats=("jpeg", "png"))
+    assert res["ok"], res["errors"]
+    blob = Path(res["files"]["jpeg"]).read_bytes()
+    info = ultrahdr.parse(blob)
+    assert info.get("gmax_channels")
+    gm = np.asarray(Image.open(io.BytesIO(ultrahdr.read_gainmap(blob)))
+                    .convert("RGB"), np.float32) / 255.0
+    sdr = np.asarray(Image.open(io.BytesIO(blob[:info["primary_len"]]))
+                     .convert("RGB"), np.float32) / 255.0
+    rec = to_bt2020(ultrahdr.reconstruct(srgb_to_linear(sdr), gm, info["gmax_channels"]))
+
+    code = png16.decode(Path(res["files"]["png"]).read_bytes()).astype(np.float32) / 65535.0
+    ref = pq_eotf(code) / 203.0
+    mask = ref > 0.05
+    rel = np.abs(rec[mask] - ref[mask]) / ref[mask]
+    assert float(np.median(rel)) < 0.05, float(np.median(rel))
+
+
 def test_build_writes_iso_by_default(tmp_path: Path) -> None:
     """Ultra HDR 1.1 默认同时写 XMP 与 ISO；主图存根、增益图完整段。"""
     src = tmp_path / "light.png"
@@ -197,8 +254,10 @@ def test_build_writes_iso_by_default(tmp_path: Path) -> None:
 
     gain_iso = validate.parse_iso(info["iso_gainmap"])
     assert gain_iso is not None and not gain_iso["stub"]
+    assert gain_iso["channels"] == 3
     assert gain_iso["alt_headroom"] == pytest.approx(info["gmax"])
-    assert gain_iso["max0"] == pytest.approx(info["gmax"])
+    for i, ch in enumerate(res["gmax_channels"]):
+        assert gain_iso[f"max{i}"] == pytest.approx(ch)
 
     rep = validate.validate_file(path)
     assert rep.ok, rep.errors

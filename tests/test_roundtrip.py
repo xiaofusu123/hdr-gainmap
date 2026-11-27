@@ -117,15 +117,16 @@ def test_build_all_formats(tmp_path: Path) -> None:
     assert res["timings"]["total"] > 0
 
 
-def test_png_hlg_cicp(tmp_path: Path) -> None:
-    """HLG 的 PNG 必须把 cICP 传递值写成 18，否则播放器按 PQ 解释会严重偏暗。"""
+def test_png_cicp_pq(tmp_path: Path) -> None:
+    """PNG 必须写 cICP(9,16,0,1) + mDCV + cLLI，缺了播放器按 sRGB 显示。"""
     src = tmp_path / "src.png"
     make_source(src)
-    res = build(src, tmp_path / "hlg", formats=("png",), transfer="HLG")
+    res = build(src, tmp_path / "pq", formats=("png",))
     assert res["ok"], res["errors"]
     blob = Path(res["files"]["png"]).read_bytes()
     idx = blob.find(b"cICP")
-    assert idx > 0 and blob[idx + 4:idx + 8] == bytes([9, 18, 0, 1])
+    assert idx > 0 and blob[idx + 4:idx + 8] == bytes([9, 16, 0, 1])
+    assert blob.find(b"mDCV") > 0 and blob.find(b"cLLI") > 0
     assert validate.validate_file(res["files"]["png"]).ok
 
 
@@ -145,7 +146,7 @@ def test_jxl_24bit(tmp_path: Path) -> None:
         pytest.skip("cjxl 不可用（设 HDRGAINMAP_CJXL 或放入 PATH）")
     src = tmp_path / "src.png"
     make_source(src)
-    res = build(src, tmp_path / "jxl", formats=("jxl",), transfer="PQ")
+    res = build(src, tmp_path / "jxl", formats=("jxl",), dpi=240)
     assert res["ok"], res["errors"]
     path = Path(res["files"]["jxl"])
     assert path.stat().st_size > 0
@@ -153,6 +154,8 @@ def test_jxl_24bit(tmp_path: Path) -> None:
     assert rep.ok, rep.format()
     assert rep.info.get("bits") == 24, rep.info
     assert str(rep.info.get("transfer", "")).upper().startswith("PQ"), rep.info
+    assert rep.info.get("dpi") == 240.0, rep.info          # 写在容器的 Exif box
+    assert not any("Exif DPI" in w for w in rep.warnings), rep.warnings
 
 
 def main() -> int:

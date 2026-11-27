@@ -1,23 +1,23 @@
 ---
 title: hdr-gainmap User Guide
 slug: hdr-gainmap-en
-summary: Turn 8-bit SDR illustrations into six HDR deliverables, lifting only what actually glows.
-description: hdr-gainmap estimates where light comes from with an illumination field, diffusion, ambient occlusion and a flat-area penalty, then encodes Ultra HDR JPEG, 16-bit PNG, 10/12-bit HEIC, 12-bit AVIF and 24-bit JPEG XL from one gain curve.
+summary: Turn 8-bit SDR illustrations into six HDR deliverables by building a light field first, then applying gain per R/G/B channel.
+description: hdr-gainmap does not use AI brightening. It estimates where light comes from with ray-marched beams, multi-scale diffuse scattering, ambient occlusion and a flat-area penalty, then writes per-channel gain into Ultra HDR JPEG, 16-bit PNG, 10/12-bit HEIC, 12-bit AVIF and 24-bit JPEG XL. Every output uses PQ + BT.2020, quality first, with built-in container validation.
 ---
 
-[简体中文](README.md) | **English**
+**Language / 语言**：**English** (current) · [简体中文](README.md)
 
-**Turn 8-bit SDR illustrations into HDR masters**: one command produces Ultra HDR JPEG, 16-bit PNG, 10/12-bit HEIC, 12-bit AVIF and 24-bit JPEG XL. There are no presets — the gain parameters are derived from each image's own light distribution.
+# hdr-gainmap
 
-**Version: Beta 0.1.2**.
+Turn 8-bit SDR illustrations into HDR masters: one command produces Ultra HDR JPEG, 16-bit PNG, 10/12-bit HEIC, 12-bit AVIF and 24-bit JPEG XL. There are no presets — gain is derived from each image's light field, separately for R, G and B.
 
 ## Examples
 
-Source `1777789210281_x4_animejanai.png` (12960×5420, 8-bit SDR):
+Source `1777789210281_x4_animejanai.png` (originally 12960×5420, 8-bit SDR; shown here downscaled to 1600×669 for the page, and the measurements below use that downscale):
 
 ![Source illustration](docs/images/sample-source.jpg)
 
-Left: SDR source; right: an approximate SDR-screen preview of the HDR master produced by this tool (`gainmap.render_preview`). The preview shows *where* the lift happens, not the real luminance on an HDR display. Water ripples, bubble rims, hair highlights and sparkles gain; the night sky and shadows stay put:
+Left: SDR source; right: an approximate SDR-screen preview of the HDR master (`gainmap.render_preview`). The preview shows *where* the lift happens, not real luminance on an HDR display:
 
 ![SDR source and HDR preview](docs/images/sample-compare.jpg)
 
@@ -25,116 +25,129 @@ HDR preview on its own:
 
 ![HDR preview](docs/images/sample-hdr-preview.jpg)
 
-Full-resolution gain map written by `--gain-fullres --debug`. Whiter means more lift: water ripples, hair and bubble highlights gain; the night sky and shadows stay near zero:
+The embedded gain map written by `--debug` (full-resolution RGB; whiter = more lift). Water ripples, hair and bubble highlights gain; the night sky and shadows stay near zero:
 
-![Full-resolution gain map](docs/images/sample-gainmap.png)
+![Gain map](docs/images/sample-gainmap.png)
 
-The gain map is half-resolution by default; decode with `gain = 2 ** (pixel / 255 * GainMapMax)` and HDR linear = SDR linear × gain.
+Decoding: `gain = 2 ** (pixel / 255 * GainMapMax)` per channel, `HDR linear = SDR linear × gain`. With a three-channel map each channel carries its own maximum.
 
-## How it works: one gain curve, six containers
+## How it works: one light field, six containers
 
-SDR pixels are linearised with the sRGB EOTF to `L_sdr`, multiplied by one scalar gain `g` to give `L_hdr = g · L_sdr`, converted to BT.2020 and encoded as PQ or HLG. All six deliverables share this curve; only the container, bit depth and chroma sampling differ, so "what glows" is identical across formats. `g = 2 ** (gmax · em)` with `em ∈ [0, 1)`, so gain spans `[1, 2**gmax)`; `gmax` comes from the image's own exposure percentiles.
+SDR pixels are linearised with the sRGB EOTF into `L_sdr`, then each channel gets its own gain:
 
-* **PQ is absolute**: `L_hdr` is scaled with SDR white = 203 nits into cd/m² and encoded. 203 nits is PQ code ≈ 0.58, so a PQ file shown in an SDR viewer looks grey — not a broken file, just no HDR rendering path.
-* **HLG is relative**: SDR white sits near 75% and the display applies its own OOTF (this tool encodes against a 1000-nit peak). HLG displays with SDR compatibility can show it directly, at the cost of a less controllable peak.
-* **Ultra HDR stores no second HDR image**: it is an 8-bit SDR base plus an 8-bit gain map. The map is normalised in log2 to `[0, GainMapMax]` (1.45 EV upper bound in this project); the decoder interpolates by display headroom and multiplies it back into SDR. Output follows Ultra HDR 1.1: XMP `hdrgm` and ISO 21496-1 are written together; 1.1 is backward-compatible with 1.0.
+```text
+L_hdr,c = g_c · L_sdr,c
+g_c     = 2 ** (gmax · em · w_c · tint_c)
+```
+
+`em ∈ [0,1)` is normalised emission, `gmax` comes from the image's own exposure percentiles, `w_c` is the light-colour weight and `tint_c` corrects surface tint. The result is converted to BT.2020 and PQ-encoded in cd/m².
+
+All six outputs share the same `em` and the same set of `gmax_c`; only the container, bit depth and chroma sampling differ.
+
+* **PQ is absolute luminance**: `L_hdr` is scaled against SDR white = 203 nits ([BT.2408-9](https://www.itu.int/dms_pub/itu-r/opb/rep/R-REP-BT.2408-9-2026-PDF-E.pdf), [EBU R 167](https://qc.ebu.io/apps/r167/)). 203 nits sits near 0.58 of the PQ signal, so a PQ file dropped into an SDR viewer looks grey — that is a missing HDR pipeline, not a broken file.
+* **Ultra HDR stores no second HDR image**: 8-bit SDR base + 8-bit RGB gain map. The map is normalised in log2 to `[0, GainMapMax]`; decoders interpolate by display headroom and multiply, channel by channel ([Ultra HDR spec](https://developer.android.com/media/platform/hdr-image-format), [ISO/IEC 21496-1](https://www.iso.org/standard/86775.html)).
+* **The other five formats** store HDR samples directly; SDR fallback is the viewer's tone mapping.
 
 ## Six outputs
 
-| Format   | Depth / codec                                                     | Typical use                                          |
-| -------- | ----------------------------------------------------------------- | ---------------------------------------------------- |
-| `jpeg`   | 8-bit sRGB base + 8-bit gain map, MPF + XMP `hdrgm` + ISO 21496-1 | Ultra HDR 1.1, `.jpeg` suffix                        |
-| `png`    | 16-bit RGB + PQ or HLG (`cICP 9/16/0/1` or `9/18/0/1`)            | Lossless master, post-production exchange            |
-| `heic10` | 10-bit HEVC Main10 (`nclx 9/16/9`)                                | Best compatibility (Windows / macOS / iOS / Android) |
-| `heic12` | 12-bit HEVC Main12 (`nclx 9/16/9`)                                | Highest depth, needs decoder support                 |
-| `avif`   | 12-bit AV1 4:4:4 (preferred; `nclx 9/16/9`)                       | Small files, web / sharing                           |
-| `jxl`    | 24-bit JPEG XL, fixed PQ + BT.2020 (`--override_bitdepth=24`)     | High-bit-depth lossless master, needs cjxl           |
+| Format   | Bit depth / codec                                                      | Typical use                            |
+| -------- | ---------------------------------------------------------------------- | -------------------------------------- |
+| `jpeg`   | 8-bit sRGB base + 8-bit RGB gain map, MPF + XMP `hdrgm` + 141-byte ISO | Ultra HDR, suffix `.jpeg`              |
+| `png`    | 16-bit RGB + PQ (`cICP 9/16/0/1`) + `mDCV` + `cLLI`                    | lossless master, post-production       |
+| `heic10` | 10-bit HEVC Main10 (`nclx 9/16/9`)                                     | widest support (Win/macOS/iOS/Android) |
+| `heic12` | 12-bit HEVC Main12 (`nclx 9/16/9`)                                     | highest depth, needs decoder support   |
+| `avif`   | 12-bit AV1 4:4:4 (`nclx 9/16/9`, auto-fallback)                        | small files, web / sharing             |
+| `jxl`    | 24-bit JPEG XL, PQ + BT.2020 (`--override_bitdepth=24`)                | deep lossless master, needs cjxl       |
 
-All six share **one gain curve**; only the container, bit depth and codec differ. The Ultra HDR gain map is half-resolution by default (`--gain-fullres` keeps it full-resolution), while the other formats are encoded from the same intermediate; JXL is fixed to PQ + BT.2020 and does not follow `--transfer` to HLG.
+Container bytes, metadata placement and compatibility traps are covered in documents 05–09 under [docs/](docs/README.md).
 
-## What it solves
+## What problem it solves
 
-Inverse tone mapping (ITM) models trained on photographs tend to fail on flat-shaded anime art: blotchy gain on flat fills, whole line-art strokes glowing, pure whites clipping. SDR illustrations have **already clipped their highlights**; there is no hidden detail to recover.
+Inverse tone mapping (ITM) models trained on photographs misbehave on anime flat shading: blotchy gain inside flat fills, entire line art glowing, clipped whites staying white. SDR illustrations have **already clipped** their highlights — there is no hidden detail to "recover".
 
-The goal is therefore not to restore highlight detail, but to decide whether a pixel is *emitting light*, and to lift only those areas on an HDR display:
+So the goal is not recovery but classification: is this pixel emitting light? Only emitters are lifted on an HDR display:
 
-* **Emitters** (lamps, sparkles, catchlights, bright hair highlights) get a clear boost;
-* **Lit surfaces** get a small boost;
-* **Large already-bright areas** such as white hair, walls and skin are left mostly alone.
+* **emitters** (lamps, sparkles, eye highlights, backlit hair) get real gain;
+* **lit surfaces** get a little;
+* **white hair, white walls, skin** — large, already-bright areas — are left alone as much as possible.
 
-## How it works
+## Algorithm: build the light field, then judge emission
 
-The pipeline lives in `hdrgainmap/gainmap.py` and `hdrgainmap/light.py`.
+Everything lives in `hdrgainmap/light.py` and `hdrgainmap/gainmap.py`. The field is computed once and reused by every test.
 
-### 1. Adaptive exposure parameters
+### 1. Light-field analysis
 
-Fixed thresholds fail across exposures: in a night scene 0.6 is already a bright highlight, while a white wall in daylight is 0.9. The image's own luminance percentiles estimate the overall exposure:
+Computed at 640 px on the long edge, then bilinearly upsampled:
 
 ```python
-t        = clip(p50 / 0.60, 0, 1)                 # 0 = night, 1 = high-key
-gmax     = min((2.2 - 0.6*t) * 0.70, 1.45)        # maximum boost in EV
-halo     = 0.16 - 0.06*t                          # bloom share
-hr       = max(1, round(3 - 2*t))                 # bloom radius in pixels
-base_lit = 0.78 - 0.16*t                          # base weight for lit areas
+src  = clip((Y - p97) / (max - p97), 0, 1) ** 1.4    # source pixels
+tau  = 0.45 + 0.55 * Y                             # brighter travels further
+F    = S + 0.88 * shift(F, dir) * tau               # 40 steps × 8 directions
+diff = Σ w_k · gauss(src, σ_k),  σ_k = base·2^k,  w_k = σ_k^-1.75
+field = 0.68*diff + 0.32*beams
+field = field * (0.25 + 0.75*Y) * atten + 0.06*(1-atten)*p90
 ```
 
-`PEAK_SCALE = 0.70` and `GMAX_CAP = 1.45` are empirical limits: above roughly 1.6 EV, some phones show black blotches in highlights, so the peak is deliberately conservative. `lift` stays at 1.0 — there is no global lift, only light-lit regions move.
+* **Sources**: pixels above the 97th percentile; exponent 1.4 keeps only clear highlights near 1.
+* **Beams**: 40 steps along 8 directions, spreading and decaying luminance. This is a propagation integral over the brightness field, not a geometric ray.
+* **Diffuse**: four Gaussians, weights `σ^-1.75` — Gaussian core, `1/r^p` tail.
+* **Absorption and airlight**: `atten = exp(-1.1·depth)`, plus 6% airlight at distance — the algorithmic form of aerial perspective (see [docs/11](docs/11-perspective.md)).
+* **AO**: `clip((near+0.02)/(far+0.02), 0.45, 1.0)^0.9`, with a guided filter on the small radius to keep edges.
+* **Light colour**: mean linear RGB of source pixels, normalised by luminance, feeding the per-channel path.
 
-### 2. Four cues for "is this emitting?"
+### 2. Adaptive parameters
 
 ```python
-illum = gauss(Y, min(h, w) // 25)                 # low-frequency illumination field
-lit   = smoothstep(p38(illum), p99(illum), illum) # regions that are lit
-
-peak  = Y / (gauss(Y, 25) + 1e-4)                 # brighter than the neighbourhood
-spark = smoothstep(1.45, 2.90, peak)              # small, sharp highlights
-
-area  = gauss(lit, min(h, w) // 8)                # area covered by "lit"
-pen   = 0.55 * smoothstep(0.35, 0.85, area) * (1 - 0.7 * spark)
-lit  *= 1 - pen                                   # suppress walls / sky
-
-irr   = smoothstep(0.35, 0.85, irradiance(Y))     # propagation / diffuse
-ao    = clip((near + 0.02) / (far + 0.02), 0.45, 1.0) ** 0.9
-amb   = 0.10 * smoothstep(0.02, 0.45, far) * ao   # ambient
-white = smoothstep(0.92, 1.0, Y) * (1 - pen)      # pure-white core
-
-emis  = base_lit*lit + 0.45*irr + 0.45*spark + 0.18*white + amb
-emis  = halo * gauss(emis, hr) + (1 - halo) * emis
+t        = clip(p50 / 0.60, 0, 1)                        # 0=night, 1=high-key
+cover    = clip(source_pct / 12, 0, 1)                   # source coverage
+gmax     = min((2.2 - 0.6*t) * 0.70 * (1 - 0.10*cover), 1.45)
+halo     = 0.16 - 0.06*t
+hr       = max(1, round(3 - 2*t))
+base_lit = 0.78 - 0.16*t
 ```
 
-Each cue covers a different failure mode:
+`cover` is new: the more of the frame is already emitting, the less global lift is needed, so `gmax` tapers. `PEAK_SCALE = 0.70` and `GMAX_CAP = 1.45` remain hard limits — past roughly 1.6 EV some phones clip highlights to black.
 
-1. **`lit` (illumination field)** — the decision is low-frequency, so a lit region rises as a whole and shadows stay put; two equally bright neighbours will not disagree.
-2. **`spark` (local peak)** — sparkles, small lamps and highlights stand out against their neighbourhood; this layer also exempts point sources from 70% of the area penalty.
-3. **`pen` (area penalty)** — a large connected "lit" area is more likely a white wall, sky or flat bright surface than an emitter; the bigger it is, the harder it is suppressed.
-4. **`white` (absolute white)** — a relative test alone misses the centre of a pure-white specular or lamp core (ratio ≈ 1), while its edge triggers, leaving a visible ring. The absolute term fills the centre; large white walls are already suppressed by `pen`.
-
-`irr` lets surfaces illuminated by a lamp gain a little, not just the lamp itself; `amb` gives distant shadows a touch of ambient light, reduced in creases by the occlusion term.
-
-### 3. Smooth saturation and dithering
+### 3. Emission tests
 
 ```python
-em   = 1 - exp(-emis / p99.9(emis) * 1.6)   # exponential roll-off, no hard clip
+illum = guided_filter(Y, gauss(Y, min(h, w)//25), r//2)   # edge-preserving low band
+lit   = smoothstep(p38(illum), p99(illum), illum)          # lit regions
+peak  = Y / (gauss(Y, 25) + 1e-4)
+spark = smoothstep(1.45, 2.90, peak)                       # point highlights
+area  = gauss(lit, min(h, w)//8)
+pen   = 0.55 * smoothstep(0.35, 0.85, area) * (1 - 0.7*spark)
+lit  *= 1 - pen                                            # large flat bright areas
+white = smoothstep(0.92, 1.0, Y) * (1 - pen)
+
+emis = base_lit*lit + 0.45*irradiance + 0.45*spark + 0.18*white + 0.10*amb
+emis = halo * gauss(emis, hr) + (1 - halo) * emis
+```
+
+`illum` is now guided by `Y` itself instead of a plain Gaussian: lit regions still rise as a whole, but object edges are not smeared. `irradiance` and `amb` come from the field's irradiance and AO.
+
+### 4. Per-channel exposure
+
+```python
+lum   = max(0.2126R + 0.7152G + 0.0722B, 1e-4)
+tint  = clip((L_c / lum) ** 0.35, 0.85, 1.15)             # surface tint
+w_c   = tint * clip(clip(light_color, 0.25, 4) ** 0.6, 0.80, 1.25)
+w_c  /= BT.709 luminance(w_c)                              # keep total luminance
+expo  = gmax * emis * w_c
+```
+
+`w_c` gives the blue channel more headroom under warm light; `tint` corrects single-channel bias on saturated surfaces. Both are clamped so pure colours do not turn neon. The weighted luminance is normalised, so overall lift is still governed by `gmax·emis`.
+
+### 5. Soft saturation and quantisation
+
+```python
+em   = 1 - exp(-emis / p99.9(emis) * 1.6)
 em   = gauss(em, 2)
-gain = 2 ** (gmax * em)
 ```
 
-A hard clip creates a plateau at 1.0 whose border is a visible iso-contour ring. The exponential curve is continuous and differentiable, so the brightest point only approaches 1.
+Hard clamping creates a plateau at 1.0 whose border is a visible contour ring. Exponential saturation is smooth everywhere and only approaches 1.
 
-The 8-bit Ultra HDR gain map is coded at full resolution in log2 space and downscaled with LANCZOS when half-resolution is requested; ±0.5 LSB triangular dither is added before quantization to break up Mach bands on large gradients. Dithering happens **after** downscaling; otherwise interpolation would smooth the noise away.
-
-## Light-transport approximation
-
-`light.py` is not a physically based renderer. It is a cheap diffusion model that answers "where does light come from, and what does it hit?":
-
-* downsample luminance to \~900 px on the long edge; pixels above the 96th percentile act as sources;
-* diffuse them at four scales, doubling σ each time, with weight `σ^-1.75`: Gaussian near the core, roughly `1/r^p` scattering in the tail;
-* multiply by surface albedo (dark surfaces absorb, light surfaces reflect more);
-* normalize at the 99.5th percentile and upsample bilinearly.
-
-The intuition comes from inverse-square falloff, diffuse reflection and atmospheric scattering (short wavelengths scatter more), but there is **no** ray tracing, no diffraction integral and no multi-bounce global illumination. It is a heuristic field designed for illustration gain: it aims to look right, not to be physically exact.
-
-Ambient occlusion is also approximated from luminance: `(small-radius mean + 0.02) / (large-radius mean + 0.02)`, clamped to 0.45–1. A locally darker spot is treated as a crease.
+The gain map is written in two passes: per-tile `expo_max` per channel, then `code = expo / expo_max * 255 + triangular dither`. Dither is applied before quantisation, breaking up Mach bands in large gradients.
 
 ## Install
 
@@ -144,83 +157,75 @@ pip install -e .
 pip install -r requirements.txt
 ```
 
-Dependencies: `numpy`, `pillow`, `pillow-heif`. AVIF output needs `ffmpeg` with libaom-av1 on the system. 24-bit JXL needs `cjxl` 0.13+ (libjxl) on `PATH`, or set `HDRGAINMAP_CJXL` / `HDRGAINMAP_JXLINFO`; without cjxl only the jxl entry fails and other formats continue. Python 3.10+.
+Requires `numpy`, `pillow`, `pillow-heif`; AVIF needs `ffmpeg` with libaom-av1. 24-bit JXL needs `cjxl` 0.13+ (libjxl) on `PATH`, or `HDRGAINMAP_CJXL` / `HDRGAINMAP_JXLINFO`. Missing cjxl fails only the `jxl` entry. Python 3.10+.
 
 ## Usage
 
 ### Common commands
 
 ```bash
-# Default: all six formats, quality 100, DPI from the source
+# default: all six formats, quality 100, DPI from the source
 python -m hdrgainmap photo.png -o out
 
-# Only 24-bit JXL (fixed PQ + BT.2020)
+# only 24-bit JXL
 python -m hdrgainmap photo.png -o out -f jxl
 
-# Batch
+# batch
 python -m hdrgainmap a.png b.jpg c.webp -o out --quiet
 
-# Only the lossless master and the most compatible HEIC
+# lossless master plus the most compatible HEIC
 python -m hdrgainmap photo.png -o out -f png,heic10
 
-# Quality 90 for lossy formats, with validation
+# quality 90 for lossy formats, with validation
 python -m hdrgainmap photo.png -o out -q 90 --validate
 
-# HLG transfer function (PQ by default)
-python -m hdrgainmap photo.png -o out --transfer HLG
-
-# Composite transparency onto white
+# flatten transparency onto white
 python -m hdrgainmap logo.png -o out --alpha-bg white
 
-# Machine-readable output
+# machine-readable output
 python -m hdrgainmap photo.png -o out --json --validate
 ```
 
 ### Output names
 
-For an input called `{stem}`:
+With input stem `{stem}`:
 
 | Output            | File name                                                              |
 | ----------------- | ---------------------------------------------------------------------- |
 | Ultra HDR JPEG    | `{stem}_ultrahdr.jpeg`                                                 |
 | 16-bit PNG        | `{stem}_hdr16_pq.png`                                                  |
-| 16-bit PNG (HLG)  | `{stem}_hdr16_hlg.png`                                                 |
 | 10-bit HEIC       | `{stem}_hdr10_pq.heic`                                                 |
 | 12-bit HEIC       | `{stem}_hdr12_pq.heic`                                                 |
 | 12-bit AVIF       | `{stem}_hdr12_pq.avif`                                                 |
-| 24-bit JXL        | `{stem}_hdr24_pq.jxl` (fixed PQ + BT.2020)                             |
-| Debug (`--debug`) | `{stem}_emis.png`, `{stem}_gainmap.png`, `{stem}_gainmap_embedded.png` |
+| 24-bit JXL        | `{stem}_hdr24_pq.jxl`                                                  |
+| debug (`--debug`) | `{stem}_emis.png`, `{stem}_gainmap.png`, `{stem}_gainmap_embedded.png` |
 
-### Exit codes and batches
+### Exit codes and batching
 
-* `0`: everything succeeded; with `--validate`, validation must also pass;
-* `1`: at least one file or format failed, or validation failed; JSON has `ok=false` and `errors`;
-* `2`: command-line usage error (argparse).
+* `0`: everything succeeded; with `--validate` the checks must also pass;
+* `1`: at least one file or format failed, or validation failed; JSON reports `ok=false` and `errors`;
+* `2`: bad command line (argparse).
 
-Batches run image by image in command-line order; one failure does not stop the rest. `--quiet` keeps only errors. With `--json`, a single image prints the result object; several images print `{"results": [...], "ok": ...}`.
+Files are processed in the order given; one failure does not stop the rest. `--quiet` prints errors only. `--json` emits one object for a single input and `{"results": [...], "ok": ...}` for several.
 
 ### Options
 
-| Option           | Description                                                               |
-| ---------------- | ------------------------------------------------------------------------- |
-| `-o, --outdir`   | Output directory, default `out`                                           |
-| `-f, --formats`  | Comma-separated: `jpeg` `png` `heic10` `heic12` `avif` `jxl`, default all |
-| `-q, --quality`  | Lossy quality 50–100, default 100                                         |
-| `--dpi`          | Output DPI, default from the source                                       |
-| `--transfer`     | Transfer function `PQ` (default) / `HLG`                                  |
-| `--alpha-bg`     | Composite colour for transparency: `black` (default) / `white`            |
-| `--gain-fullres` | Keep the gain map at full resolution (half by default)                    |
-| `--validate`     | Validate every output after encoding; exit code 1 on failure              |
-| `--debug`        | Also write `_emis.png`, `_gainmap.png`, `_gainmap_embedded.png`           |
-| `--quiet`        | Suppress progress output                                                  |
-| `--json`         | JSON output (paths + stats + validation)                                  |
-| `--version`      | Print the version                                                         |
+| Option          | Meaning                                                         |
+| --------------- | --------------------------------------------------------------- |
+| `-o, --outdir`  | output directory, default `out`                                 |
+| `-f, --formats` | comma-separated: `jpeg` `png` `heic10` `heic12` `avif` `jxl`    |
+| `-q, --quality` | lossy quality 50–100, default 100                               |
+| `--dpi`         | output DPI, default from the source                             |
+| `--alpha-bg`    | flatten transparency onto `black` (default) or `white`          |
+| `--validate`    | validate every output, exit 1 on failure                        |
+| `--debug`       | also write `_emis.png`, `_gainmap.png`, `_gainmap_embedded.png` |
+| `--quiet`       | no progress output                                              |
+| `--json`        | JSON with paths, stats and validation reports                   |
+| `--version`     | print version                                                   |
 
-Option scope: `-q` affects JPEG/HEIC/AVIF only (PNG and JXL are always lossless); `--transfer` affects PNG/HEIC/AVIF, not the Ultra HDR SDR base, and JXL stays fixed at PQ + BT.2020; `--dpi` is written into every output's metadata (not JXL yet); `--gain-fullres` affects only the Ultra HDR gain map; `--alpha-bg` only matters for sources with alpha.
+Scope: `-q` affects JPEG/HEIC/AVIF only (PNG and JXL are always lossless); `--dpi` is written to every output, JXL included (container `Exif` box); `--alpha-bg` only matters for sources with alpha. `--transfer` and `--gain-fullres` were removed: transfer is always PQ and the gain map is always full-resolution.
 
-A failure on one image does not stop a batch: each file is processed independently and the final exit code reports whether anything failed.
-
-The three `--debug` images serve different purposes: `_emis.png` is the emission field (an intermediate weight, not the final gain); `_gainmap.png` is a full-resolution 8-bit log2-normalised visualisation of the gain; `_gainmap_embedded.png` is exactly the map embedded in the Ultra HDR JPEG (half resolution, or full with `--gain-fullres`, including dither). Decode the first two with `gain = 2 ** (pixel / 255 * GainMapMax)`.
+The three debug images differ: `_emis.png` is the emission field (intermediate weights, not final gain); `_gainmap.png` is a log2-normalised view of the scalar gain; `_gainmap_embedded.png` is the RGB map actually embedded in the JPEG (with dither).
 
 ## Python API
 
@@ -232,140 +237,138 @@ res = build(
     "out",
     formats=("jpeg", "png", "heic12", "jxl"),
     quality=100,
-    transfer="PQ",
     alpha_bg=(0, 0, 0),
-    log=print,          # optional progress callback
+    log=print,
 )
 print(res["files"]["heic12"])
-print(res["stats"]["peak_nits"], res["stats"]["untouched_pct"])
+print(res["stats"]["peak_nits"], res["stats"]["gmax_channels"])
 ```
 
-`build()` returns (values vary per image):
+`build()` returns (values vary by image):
 
 ```python
 {
-  "src": "photo.png", "dpi": 240.0, "transfer": "PQ", "gmax": 1.42,
+  "src": "photo.png", "dpi": 240.0, "gmax": 1.45,
+  "gmax_meta": 1.374893, "gmax_channels": [1.201138, 1.214826, 1.374893],
   "files": {"jpeg": "...", "png": "...", "heic12": "..."},
   "errors": {},
-  "stats": {"gain_mean": 1.18, "gain_max": 2.05, "untouched_pct": 42.0,
-            "gt2x_pct": 1.8, "peak_nits": 416.0, "base_reused": True},
-  "timings": {"load": 0.8, "base": 0.0, "gain": 36.7, "hdr": 6.7,
-              "jxl": 0.8, "jpeg": 0.8, "png": 22.8, "heic12": 1.0,
-              "avif": 4.2, "total": 75.0},
+  "stats": {"gain_mean": 1.212, "gain_max": 2.230, "untouched_pct": 48.4,
+            "gt2x_pct": 1.7, "peak_nits": 486.0, "base_reused": True},
+  "timings": {"load": 0.02, "gain": 1.23, "hdr": 0.25, "jxl": 0.79,
+              "jpeg": 0.45, "png": 0.76, "heic10": 0.99, "heic12": 0.97,
+              "avif": 1.83, "total": 7.27},
   "ok": True,
 }
 ```
 
 Key fields:
 
-* `files`: paths of successful outputs; `errors`: per-format failures, other formats continue;
-* `stats.gain_mean / gain_max`: linear gain multipliers;
-* `stats.untouched_pct`: share of pixels with `gain < 1.02` (essentially unchanged);
-* `stats.gt2x_pct`: share of pixels with gain above 2×;
-* `stats.peak_nits`: absolute luminance of the linear HDR peak;
-* `stats.base_reused`: whether the source JPEG was reused as the SDR base (only when the source is JPEG, has no alpha, needed no ICC conversion, orientation is 1 and DPI is unchanged);
-* `timings`: seconds per stage, `total` overall;
-* `ok`: no format failed.
+* `gmax`: scalar maximum gain (stats and debug); `gmax_channels`: per-channel maxima; `gmax_meta`: the single-channel fallback written to XMP;
+* `files`: successful paths; `errors`: per-format exceptions, other formats continue;
+* `stats.gain_mean / gain_max`: scalar gain mean/peak;
+* `stats.untouched_pct`: share of pixels with `gain < 1.02`;
+* `stats.gt2x_pct`: share above 2×;
+* `stats.peak_nits`: absolute peak luminance of the HDR linear image;
+* `stats.base_reused`: whether the source JPEG was reused as the SDR base;
+* `timings`: seconds per stage, `total` overall; `ok`: no format failed.
 
-Modules can also be used directly:
+Individual modules:
 
 ```python
-from hdrgainmap import gainmap, color, png16, heic10, avif
+from hdrgainmap import gainmap, light, color, png16, heic10, avif
 
-rgb, im, meta = gainmap.prepare_image("photo.png")   # orientation/alpha/ICC normalized
+rgb, im, meta = gainmap.prepare_image("photo.png")   # orientation/alpha/ICC normalised
 y = gainmap.luma(rgb)
-cfg = gainmap.adapt_params(rgb, y=y)
-_, emis = gainmap.emissive(rgb, cfg, y=y)
+scene = light.analyze(rgb, y)                        # sources/beams/irradiance/AO/depth
+cfg = gainmap.adapt_params(rgb, y=y, scene=scene)
+_, emis = gainmap.emissive(rgb, cfg, y=y, scene=scene)
+weights = gainmap.channel_weights(rgb, y=y, scene=scene)
 gain = gainmap.gain_of(gainmap.finalize(emis), cfg["gmax"])
-
-hdr_linear = color.srgb_to_linear(rgb) * gain[..., None]
-q16 = color.pq_oetf(color.to_bt2020(hdr_linear) * 203.0) * 65535
-png16.encode(q16, dpi=240, transfer="PQ")
-heic10.encode(q16, transfer="PQ", bits=12, quality=100, dpi=240)
-avif.encode(q16, transfer="PQ", bits=12, quality=100, dpi=240)   # → (blob, bits)
 ```
 
-24-bit JXL bypasses q16: write a PFM (float32 code values) and hand it to cjxl:
+For 16-bit PQ codes, use the pipeline's per-channel, tiled path:
+
+```python
+from hdrgainmap.pipeline import _hdr_code
+
+q16 = _hdr_code(rgb, gainmap.finalize(emis), cfg["gmax"], weights, tile_rows=2048)
+```
+
+24-bit JXL skips `q16`: write a PFM of float32 codes, then hand it to cjxl:
 
 ```python
 from pathlib import Path
 from hdrgainmap import jxl, pipeline
 
 pfm = Path("tmp.pfm")
-pipeline._write_pfm(rgb, gain, "PQ", pfm)
-jxl.encode(pfm, "out.jxl", "PQ")     # --override_bitdepth=24 -d 0
+pipeline._write_pfm(rgb, gainmap.finalize(emis), cfg["gmax"], weights, pfm)
+jxl.encode(pfm, "out.jxl")      # --override_bitdepth=24 -d 0
 pfm.unlink()
 ```
 
 ## Colour and containers
 
-* **Source pixels are interpreted as sRGB.** Sources with an ICC profile are converted to sRGB first (Display-P3, Adobe RGB, CMYK and LAB are supported); if conversion fails, the original profile is kept. EXIF orientation is applied first, and alpha is composited over `--alpha-bg`.
-* After linearization the gain is applied, then the image is converted to **BT.2020** and encoded as **PQ (203-nit reference white)** or **HLG (1000-nit peak)**.
-* **PNG** writes `cICP = (9, 16, 0, 1)` (BT.2020 / PQ / RGB matrix / full range); HLG uses transfer 18. `matrix=0` is correct for RGB.
-* **HEIC** writes `nclx = (9, 16, 9)` (18 for HLG). **The matrix must be 9** (BT.2020 NCL); otherwise it falls back to 6 (BT.601) and some decoders invert the wrong matrix, shifting colours.
-* **AVIF**: the ffmpeg muxer writes no colour tags (always 2/2), so the `nclx` box is patched afterwards; DPI is added as an Exif item (`iloc` / `iinf` / `iref` plus a TIFF at the end of `mdat`, `infe` version 2).
-* **JXL** is fixed at 24-bit, PQ and BT.2020 (`Rec2100PQ`) and ignores `--transfer`. cjxl does not read PNG PQ tags, so PFM float32 carries the code values and `--override_bitdepth=24 -d 0` encodes losslessly, avoiding fake depth from relabelling 16-bit data. JXL does not write DPI yet.
-* **DPI**: PNG uses `pHYs`; HEIC uses EXIF 282/283/296; AVIF gets an Exif item. This makes Explorer show 240 dpi instead of 72.
+* **Source pixels are interpreted as sRGB**; embedded ICC profiles are converted to sRGB (Display-P3, Adobe RGB, CMYK, LAB), falling back to the original on failure. EXIF orientation is applied first; alpha is flattened per `--alpha-bg`.
+* Gain is applied **per channel** in linear light, then converted to **BT.2020** and encoded with **PQ** (SDR white = 203 nits). One path for all formats.
+* **PNG** writes `cICP = (9, 16, 0, 1)` (BT.2020 / PQ / RGB matrix / full range), plus `mDCV` (BT.2020, D65, 1000/0.005 nits) and `cLLI` (MaxCLL = MaxFALL = actual peak). `matrix=0` is correct for RGB.
+* **HEIC** writes `nclx = (9, 16, 9)`; **matrix must be 9** (BT.2020 NCL). Left at 6 (BT.601), some decoders apply the wrong inverse matrix and colours shift.
+* **AVIF**'s ffmpeg muxer writes no colour tags (2/2), so the seven `nclx` bytes are patched after encoding; DPI is added as an Exif item. 12-bit 4:4:4 falls back to 12/420 → 10/444 → 10/420.
+* **JXL** is fixed at 24-bit, PQ, BT.2020 (`Rec2100PQ`). cjxl does not read PNG's PQ tag, so codes travel as float32 in a PFM and are encoded with `--override_bitdepth=24 -d 0`, avoiding fake depth from a 16-bit left shift. DPI rides in the container `Exif` box (`-x exif=`, TIFF without the `Exif\0\0` prefix) with `--compress_boxes` off so it stays readable.
+* **DPI**: PNG uses `pHYs`; HEIC borrows EXIF 282/283/296; AVIF adds an Exif item.
 
 ### Ultra HDR: one JPEG, two pictures
 
-Ultra HDR does not stuff HDR samples into a JPEG. It is an **8-bit SDR base plus an 8-bit gain map**. The two JPEGs are linked by **MPF** (Multi-Picture Format); the base is a complete SDR image, and the gain map records each pixel's light ratio to the base in log2 space, so a decoder can scale the base by display headroom.
+Ultra HDR is not HDR samples stuffed into JPEG. It is **an SDR base image plus an 8-bit gain map**, tied together by **MPF** (CIPA DC-007). The base is a complete SDR image; the map stores each pixel's log2 ratio, and decoders interpolate it by display headroom before multiplying.
 
-This project always emits Ultra HDR 1.1: XMP `hdrgm` and ISO 21496-1 are written together. 1.1 is backward-compatible with 1.0, so there is no XMP-only mode.
+The output is Ultra HDR 1.1: XMP `hdrgm` and ISO 21496-1 are written together, and 1.1 is backward compatible with 1.0.
 
-Gain-map convention in this project:
+Gain-map conventions:
 
-* 8-bit grayscale JPEG, half-resolution by default (`--gain-fullres` keeps it full-resolution);
-* sample = `log2(gain)` normalised to `[0, GainMapMax]`, then quantised to 0–255;
-* ±0.5 LSB triangular dither is added before quantisation; at half resolution the code is computed at full resolution in log2 space, downscaled with LANCZOS, and dithered last — the reverse order would smooth the noise away;
-* `GainMapMin = 0`, `GainMapMax = log2(max(gain))`, `Gamma = 1`, `OffsetSDR = OffsetHDR = 1/64` (0.015625), `BaseRenditionIsHDR = False`.
+* 8-bit **RGB** JPEG, `q=100`, `optimize`, `subsampling=0`;
+* **full resolution** `w × h`;
+* value = `expo_c / expo_max,c` scaled to 8 bits, with ±1 LSB triangular dither applied before quantisation;
+* `GainMapMin = 0`, `GainMapMax = max(gmax_channels)` (XMP fallback), `Gamma = 1`, `OffsetSDR = OffsetHDR = 1/64`, `BaseRenditionIsHDR = False`.
 
 #### Container and metadata
 
-Both pictures are complete JPEGs. The primary is ordered **ICC → EXIF → ISO 21496-1 → MPF → XMP**, the gain map **XMP → ISO 21496-1**. The MPF TIFF directory has two entries: the primary with attribute `0x00030000` and the gain map with attribute `0`; offsets are relative to the MPF TIFF header. The primary XMP also carries the `GContainer` directory (`Primary`, `GainMap`, and the gain-map byte length).
+Both pictures are complete JPEGs. The primary is ordered **ICC → EXIF → ISO stub → MPF → XMP**; the gain map carries **XMP → ISO (141 bytes)**. The MPF TIFF directory has two entries: primary attribute `0x00030000`, gain-map attribute `0`, with the gain-map offset relative to the MPF TIFF header.
 
-The `hdrgm` parameters use the **element** form (`<hdrgm:GainMapMax>1.089…</hdrgm:GainMapMax>`), not attributes: the attribute form produced black highlights on some Honor / Android 16 devices.
+`hdrgm` uses **element** form, never attribute form: attribute form makes highlights go black on some Honor / Android 16 devices.
 
 #### Two metadata sets: XMP and ISO 21496-1
 
-* **XMP `hdrgm`**: the original Ultra HDR 1.1 carrier; values are decimal fixed-point with 8 decimals.
-* **ISO 21496-1 APP2**: the 2025 standard for generic gain-map metadata. The primary carries only a 4-byte version stub (`min_version` / `writer_version` = 0); the gain map carries the full 61 bytes: `flags` (`0x40` = single channel + use base colour space), base/alternate headroom, and five rationals per channel (gain min/max, gamma, base offset, alternate offset). Everything is **big-endian** with `1e8` denominators, so it matches XMP's 8 decimals exactly.
-* Both sets are always written and must agree; `validate` cross-checks `GainMapMax`, `GainMapMin` and `OffsetSDR` against the ISO fields.
+* **XMP `hdrgm`**: the original Ultra HDR carrier, decimal fixed point with eight decimals. It has only a single-channel `GainMapMax` and serves as the legacy fallback.
+* **ISO 21496-1 APP2**: a 4-byte version stub in the primary, and the full **141-byte** three-channel payload in the gain map — `flags = 0xC0` (bit 7 three channels, bit 6 use base colour space), base/alternate headroom, then five rationals per channel (min / max / gamma / base offset / alternate offset). Big-endian, denominator `1e8`.
+* Both are always written and must agree; `validate` cross-checks them.
 
-> ISO must be big-endian by spec: a little-endian `0.89387586` decodes as \~`75`, which turns highlights black. An earlier build had that bug; it is fixed and covered by a byte-exact regression test against a reference sample.
+> ISO requires big-endian: `0.89387586` read little-endian becomes about `75`, which turns highlights black. The writer emits big-endian and the validator checks it byte by byte.
 
 #### Decoding
 
-Ignoring display headroom, the simplest form is:
-
 ```text
-gain = 2 ** (pixel / 255 * GainMapMax)
-HDR  = (SDR + OffsetSDR) * gain - OffsetHDR
+log2_gain_c = GainMapMax_c * (pixel_c / 255)
+HDR_c       = (SDR_c + OffsetSDR) * 2 ** log2_gain_c - OffsetHDR
 ```
 
-`pixel` is the 8-bit gain-map sample and `SDR` is the linearised primary in `0..1`. A headroom-aware decoder first interpolates `log2_gain` from `log2(max_display_boost)` between `[HDRCapacityMin, HDRCapacityMax]`, so the same file looks different on a 400-nit and a 1000-nit display.
+`pixel_c` is channel c of the gain map. Headroom-aware decoders first interpolate `log2_gain` between `[HDRCapacityMin, HDRCapacityMax]` from `log2(max_display_boost)`, so the same file looks different on a 400-nit and a 1000-nit panel.
 
 ## Quality and performance
 
-Defaults are quality-first:
+Quality-first defaults:
 
-* JPEG quality 100, 4:4:4 with no chroma subsampling;
-* HEIC / AVIF quality 100 (AVIF uses AV1 `crf = (100-q)*0.63`, so 100 → crf 0);
-* AVIF prefers 4:4:4; 4:2:0 smears coloured highlights on line art; if 12-bit 4:4:4 fails it falls back to 4:2:0 or 10-bit;
-* PNG is lossless, zlib level 9;
-* JXL is 24-bit lossless (cjxl `-d 0 -e 7 --override_bitdepth=24`), fixed PQ + BT.2020;
-* the gain map is half-resolution by default: it is coded at full resolution in log2 space, then downscaled with LANCZOS, and dithered after scaling; `--gain-fullres` keeps it full-resolution (9.91 MB embedded JPEG at 70.2 MP in our test).
+* JPEG quality 100, 4:4:4, including the gain map at full resolution;
+* HEIC / AVIF quality 100 (AVIF `crf = (100-q)*0.63`, so 100 → crf 0);
+* AVIF prefers 4:4:4 — 4:2:0 smears coloured highlights on line art;
+* PNG lossless, zlib level 9, with `mDCV`/`cLLI`;
+* JXL 24-bit lossless (`-d 0 -e 7 --override_bitdepth=24`).
 
-Performance (6-core CPU, 17.8 MP / 5800×3066 reference):
+Measured (6-core CPU):
 
-* Ultra HDR JPEG only: about 45 s, of which roughly 37 s is the gain computation;
-* 70.2 MP (12960×5420) for five formats (excluding JXL): about 7.5 minutes — gain 181 s, PNG 111 s, AVIF 89 s, HEIC 18 s; a full-resolution gain map adds about 20% to the Ultra HDR size;
-* 24-bit JXL: about 2.4 s for 1000×1700 (jxl 0.8 s), 9.3 MB; 70.2 MP in about 232 s (gain 153 s, hdr 25 s, jxl 51 s), 273 MB; the PFM is a temporary file of roughly pixels × 12 bytes (about 840 MB at 70 MP) deleted after encoding;
-* PNG dominates the rest: about 23 s at 17.8 MP;
-* HDR encoding runs in tiles (`tile_rows=2048`) so the full float32 image is not held at once;
-* every output is written atomically (temp file + `os.replace`), so a failure never leaves a truncated file.
+* **1600×669 example**: 7.27 s end to end, gain 1.23 s; Ultra HDR 0.87 MB, PNG 3.94 MB, HEIC 0.36 MB, AVIF 1.73 MB, JXL 5.73 MB; peak 486 nits; per-channel gmax 1.20 / 1.21 / 1.37;
+* **Reconstruction**: gains decoded from the Ultra HDR JPEG versus the PNG master show 1.3% mean relative error, 4.2% p95, peak 489 vs 486 nits;
+* **earlier 70 MP measurements** (order of magnitude only): 17.8 MP Ultra HDR alone ≈ 45 s; 70.2 MP five formats ≈ 7.5 min (gain 181 s, PNG 111 s, AVIF 89 s, HEIC 18 s); 70.2 MP JXL ≈ 232 s / 273 MB with an ≈ 840 MB temporary PFM.
 
-At 100 MP-class sizes the PNG can reach a few hundred MB; allow enough memory. `Image.MAX_IMAGE_PIXELS = None` disables Pillow's decompression-bomb guard.
+HDR intermediates are encoded in `tile_rows=2048` bands so a full float32 frame never has to be resident; every output is written atomically (temp file + `os.replace`). At hundreds of megapixels PNG reaches hundreds of MB — plan memory accordingly.
 
 ## Validation
 
@@ -373,77 +376,103 @@ At 100 MP-class sizes the PNG can reach a few hundred MB; allow enough memory. `
 python -m hdrgainmap.validate out/x_hdr16_pq.png out/x_hdr10_pq.heic out/x_hdr12_pq.heic out/x_hdr12_pq.avif out/x_hdr24_pq.jxl
 ```
 
-* **PNG**: 16-bit RGB IHDR, `cICP` 9/16 or 9/18, pHYs, zlib length and filter-byte range, decodability;
-* **HEIC**: bit depth 10/12, `nclx` primaries=9, transfer 16/18, **matrix=9**, peak-code clipping;
-* **AVIF**: major brand, `nclx` (primaries=9, transfer 16/18, matrix=9), `pixi` depth, decodability;
-* **Ultra HDR**: two MPF entries, `hdrgm` parameters, gain-map decodability, and ISO 21496-1 field checks when present;
-* **JXL**: container/codestream signature, 24-bit depth from `jxlinfo`, PQ/HLG transfer and Rec.2100 primaries; without jxlinfo it degrades to a signature check plus a warning.
+* **PNG**: IHDR 16-bit RGB, `cICP` 9/16, `mDCV` 24 bytes, `cLLI` 8 bytes, pHYs, zlib length and filter bytes, decodability;
+* **HEIC**: 10/12-bit, `nclx` primaries=9, transfer 16, **matrix=9**, code-value clipping;
+* **AVIF**: major brand, `nclx`, `pixi` depth, decodability;
+* **Ultra HDR**: two MPF entries, `hdrgm`, decodable gain map; ISO field-by-field (stub, 141-byte payload, agreement with XMP);
+* **JXL**: signature, `jxlinfo` reports 24-bit, transfer PQ, primaries Rec.2100; without jxlinfo it degrades to a signature check with a warning.
 
 ## Tests
 
 ```bash
-python -m pytest                # 19 tests
-python tests/test_roundtrip.py  # or run the script directly
+python -m pytest              # 21 passed, 1 skipped without cjxl
+python tests/test_roundtrip.py  # standalone script also works
 ```
 
-Coverage: PQ round-trip, adaptive parameters, full build of all six formats, 24-bit JXL depth/colour checks, both PNG decode paths agreeing pixel-for-pixel, HLG `cICP`, quality affecting size, EXIF orientation, alpha compositing, ICC→sRGB, tiled HDR encoding consistency, large-flat-area suppression, atomic writes, JPEG base reuse, API argument validation, debug gain-map output, and ISO 21496-1 big-endian layout/readability.
+Coverage: PQ round-trip, adaptive parameters, all six formats, 24-bit JXL depth/colour, both PNG decode paths, `cICP`/`mDCV`/`cLLI`, quality affecting size, EXIF orientation, alpha flattening, ICC→sRGB, tiled HDR consistency, luminance conservation of per-channel weights, flat-area penalty, atomic writes, JPEG base reuse, API validation, RGB full-resolution debug map, ISO three-channel layout, and Ultra HDR reconstruction versus PNG.
 
-## Known limits
+## Known limitations
 
 * **12-bit HEIC is niche**: the Windows HEVC extension only ships Main10; Main12 fails with `0xC00D3E8C` and needs a third-party decoder.
-* **12-bit AVIF**: Chromium-based browsers and Firefox software decode can display it; the Windows Photos app needs the AV1 extension.
-* **PQ looks grey in an SDR pipeline**: SDR white (203 nits) is only about code 0.58, so without an HDR rendering path it will look washed out.
-* **HEIF has no DPI field**: the tool stores DPI in EXIF; WIC honours it, some third-party apps do not.
-* **SDR fallback for HEIC/AVIF depends on the viewer**: the file contains only an HDR image, with no separate SDR base. Some Android 16 devices lift all PQ codes, so the SDR view looks overexposed while HDR is correct. This is a device mapping issue and is not compensated in the encoder.
-* **Heuristic boundaries**: very large flat bright surfaces may be under-boosted; noise in very dark images can be mistaken for sparkle; the model is not physically exact.
-* **AVIF is plain HDR AVIF**, not a gain-map tmap container; SDR fallback is left to the viewer.
-* **24-bit JXL has limited viewer support**: recent Chrome/Firefox can decode it; Windows Photos and Explorer may not. JXL does not write DPI yet and ignores `--transfer` (fixed PQ + BT.2020).
-* **No GPU acceleration**: the gain field and blurs run on the CPU with NumPy.
+* **12-bit AVIF**: Chromium and Firefox software-decode it; Windows Photos needs the AV1 extension.
+* **PQ in an SDR pipeline looks grey** by construction: SDR white (203 nits) is only \~0.58 of the signal.
+* **HEIF has no DPI field**: DPI lives in EXIF; WIC honours it, some third-party apps do not.
+* **HEIC/AVIF SDR fallback is viewer-dependent**: there is only one HDR image, no separate SDR base; some Android 16 devices raise PQ codes globally, making the SDR view look overexposed while HDR is fine.
+* **XMP-only decoders lose per-channel gain**: XMP stores a single maximum; the per-channel split exists only in the ISO payload.
+* **Heuristic limits**: very large flat bright areas can be suppressed too much; noise in very dark images can be mistaken for sparkles; the light field's "depth" is a proxy, not a real Z.
+* **AVIF output is plain HDR AVIF**, not a gain-map tmap container; SDR fallback is the viewer's job.
+* **24-bit JXL support is thin**: recent Chrome/Firefox decode it; Windows Photos and Explorer may not; DPI lives in the container `Exif` box, so only Exif-aware tools show it.
+* **No GPU**: the light field and blurs run on the CPU with NumPy.
+
+## Technical documentation
+
+Standards, theory and container byte layouts live under [docs/](docs/README.md), twelve documents:
+
+| #  | Document                                                        | Contents                                                      |
+| -- | --------------------------------------------------------------- | ------------------------------------------------------------- |
+| 01 | [HDR vs SDR: definitions and standards](docs/01-hdr-and-sdr.md) | three meanings of dynamic range, standards, 203 nits          |
+| 02 | [PQ and luminance](docs/02-pq-and-brightness.md)                | ST 2084, code-value tables, bit depth                         |
+| 03 | [Gamut, depth and colour](docs/03-color-gamut-and-depth.md)     | BT.2020, matrices, dither, ICC vs CICP                        |
+| 04 | [How gain maps work](docs/04-gain-map.md)                       | ratios, log2, headroom, per-channel, ISO                      |
+| 05 | [JPEG and Ultra HDR](docs/05-jpeg-ultra-hdr.md)                 | MPF, XMP, ISO 21496-1, compatibility                          |
+| 06 | [PNG](docs/06-png.md)                                           | chunks, filters, cICP/mDCV/cLLI, 16-bit                       |
+| 07 | [HEIC](docs/07-heic.md)                                         | HEIF boxes, HEVC Main10/12, nclx                              |
+| 08 | [AVIF](docs/08-avif.md)                                         | AV1, 12-bit 4:4:4, byte patching                              |
+| 09 | [JPEG XL](docs/09-jpeg-xl.md)                                   | 24-bit, PFM, cjxl                                             |
+| 10 | [Light and rendering](docs/10-light-and-rendering.md)           | propagation, reflection, ray tracing, GI, AO, the light field |
+| 11 | [Spatial perspective](docs/11-perspective.md)                   | linear/aerial perspective, depth cues                         |
+| 12 | [Glossary](docs/12-glossary.md)                                 | bilingual terms, symbols, units                               |
+
+Citations sit where they are used (`[[n]](#rn)` → sources at the end of each document); there is no separate bibliography page. Version history lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
 ```
 hdr-gainmap/
 ├─ hdrgainmap/
-│  ├─ color.py      colour spaces and transfer functions (sRGB / PQ / HLG / BT.2020)
-│  ├─ gainmap.py    image normalization, adaptive params, emission weights, gain
-│  ├─ light.py      multi-scale light diffusion (where light comes from, what it hits)
-│  ├─ png16.py      16-bit PQ/HLG PNG encode/decode
-│  ├─ heic10.py     10/12-bit HEIC encode/decode (nclx 9/16/9)
-│  ├─ avif.py       12-bit AVIF encode/decode (ffmpeg/libaom, nclx and Exif DPI fixes)
-│  ├─ jxl.py        24-bit JPEG XL (PFM → cjxl, fixed PQ + BT.2020)
-│  ├─ ultrahdr.py   Ultra HDR 1.1 mux/parse (MPF + XMP hdrgm + ISO 21496-1)
-│  ├─ validate.py   container compliance checks
+│  ├─ color.py      colour spaces and transfer functions (sRGB / PQ / BT.2020)
+│  ├─ gainmap.py    input normalisation, emission weights, per-channel weights
+│  ├─ light.py      light-field analysis (sources, beams, irradiance, AO, depth)
+│  ├─ png16.py      16-bit PQ PNG codec (cICP / mDCV / cLLI)
+│  ├─ heic10.py     10/12-bit HEIC codec (nclx 9/16/9)
+│  ├─ avif.py       12-bit AVIF codec (ffmpeg/libaom, nclx and Exif DPI patching)
+│  ├─ jxl.py        24-bit JPEG XL (PFM → cjxl)
+│  ├─ ultrahdr.py   Ultra HDR mux/parse (MPF + XMP + three-channel ISO)
+│  ├─ validate.py   output validation
 │  ├─ pipeline.py   end-to-end build
 │  └─ cli.py        command line
 ├─ tests/
 │  ├─ test_roundtrip.py
 │  └─ test_units.py
-├─ docs/images/     README example images (source, comparison, preview, gain map)
+├─ docs/            technical documentation 01–12 (Chinese) + images/ example images
+├─ CHANGELOG.md     version history
 ├─ pyproject.toml
 ├─ LICENSE          MIT
-├─ THIRD_PARTY_NOTICES.md
-└─ _archive/        historical snapshots and experiment scripts (reference only)
+└─ _archive/        historical snapshots and experiments
 ```
 
-## References
+## Licence and third parties
 
-* [Android Ultra HDR image format](https://developer.android.com/media/platform/hdr-image-format)
-* [ISO/IEC 21496-1](https://www.iso.org/standard/86775.html) and [CIPA DC-007](https://www.cipa.jp/std/documents/e/DC-X007-KEY_E.pdf)
-* [google/libultrahdr](https://github.com/google/libultrahdr)
-* [PNG Third Edition (W3C Recommendation)](https://www.w3.org/TR/png-3/)
-* [AVIF specification](https://aomediacodec.github.io/av1-avif/)
-* [JPEG XL project and spec entry](https://jpeg.org/jpegxl/) and [libjxl](https://github.com/libjxl/libjxl) (ISO/IEC 18181-1/2)
-* [ITU-R BT.2408-9 (203-nit HDR reference white)](https://www.itu.int/dms_pub/itu-r/opb/rep/R-REP-BT.2408-9-2026-PDF-E.pdf)
-* Tariq & Chapiro, *Perceptually Adaptive Real-Time Tone Mapping*, 2023 ([paper](https://achapiro.github.io/Tar23/Tar23.pdf))
-* [gainmaps.com](https://www.gainmaps.com/)
+This project is released under the MIT License; see [LICENSE](LICENSE). There is no separate notices file — the complete list follows.
 
-## License and compliance
+**Runtime dependencies**
 
-This project is released under the MIT License; see [LICENSE](LICENSE). Every third-party dependency and tool, with version and licence, is listed in [THIRD\_PARTY\_NOTICES.md](THIRD_PARTY_NOTICES.md).
+| Component   | Licence      | Notes                                                                                        |
+| ----------- | ------------ | -------------------------------------------------------------------------------------------- |
+| NumPy       | BSD-3-Clause | arrays and filtering                                                                         |
+| Pillow      | MIT-CMU      | image I/O, ICC conversion                                                                    |
+| pillow-heif | BSD-3-Clause | HEIF/HEIC; the wheel bundles libheif LGPL-3.0, x265 GPL-2.0/commercial and libde265 LGPL-3.0 |
 
-* Runtime dependencies: NumPy (BSD-3-Clause), Pillow (MIT-CMU), pillow-heif (BSD-3-Clause; its wheel bundles libheif LGPL-3.0, x265 GPL-2.0-or-commercial and libde265 LGPL-3.0).
-* External tools: FFmpeg (the local 9.1 full build enables GPL components and is used under GPLv3), libaom (BSD-style), SVT-AV1 (BSD-3-Clause Clear), x264/x265 (GPL-2.0), libjxl/cjxl (BSD-3-Clause).
-* This repository redistributes none of those binaries: FFmpeg is invoked through `subprocess`, and HEIC goes through pillow-heif/libheif. The project itself therefore remains MIT-licensed. If you redistribute a GPL FFmpeg build or a wheel bundling x265, you must provide the GPLv3/LGPL-3.0 licence texts and corresponding source.
-* No extra licence purchase is needed for the current use; the commercial x265 option only matters when you cannot accept the GPL terms and need closed-source redistribution.
-* The repository contains no third-party images; the example images were generated from a user-provided source, so confirm your rights to that source before redistributing it.
+**External tools** (not bundled; invoked via `subprocess` at runtime)
+
+| Tool          | Licence                            | Use                     |
+| ------------- | ---------------------------------- | ----------------------- |
+| FFmpeg        | GPL build locally (GPL components) | AVIF muxing, PNG decode |
+| libaom        | BSD-style                          | AV1 encoding            |
+| SVT-AV1       | BSD-3-Clause Clear                 | AV1 fallback            |
+| x264 / x265   | GPL-2.0                            | indirectly via libheif  |
+| libjxl / cjxl | BSD-3-Clause                       | JPEG XL encoding        |
+
+The project itself stays MIT. Redistributing a GPL build of ffmpeg or an x265-bearing wheel requires GPLv3/LGPL-3.0 licence texts and corresponding sources. No extra licence purchase is needed for the current usage; an x265 commercial licence only matters for closed-source distribution that cannot accept the GPL. The repository contains no third-party images; the examples were generated from a user-provided source, so confirm your rights before redistributing them.
+
+**Language / 语言**：**English** (current) · [简体中文](README.md)

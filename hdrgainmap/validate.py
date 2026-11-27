@@ -1,13 +1,9 @@
-"""严格校验 HDR 产物：Ultra HDR JPEG / 16bit PQ/HLG PNG / 10/12bit HDR HEIC / HDR AVIF / 24bit JXL。
+"""严格校验 HDR 产物：Ultra HDR / 16bit PQ PNG / 10-12bit HEIC / AVIF / 24bit JXL。
 
-Ultra HDR 部分逐条镜像 Android Ultra HDR v1.1 与 libultrahdr 的
-``hasValidMpfAssociation()``：任何一条不满足，解码器都会悄悄忽略增益图回退 SDR。
-这里把"errors"（解码器必然/极可能忽略）与"warnings"（能显示但不合规或兼容性差）
-分开，方便定位到底是哪一环写错了。
+Ultra HDR 部分镜像 Android v1.1 与 libultrahdr 的 hasValidMpfAssociation()：
+errors 表示解码器会忽略或报错，warnings 表示能显示但不合规。
 
-用法::
-
-    python -m hdrgainmap.validate out/x_ultrahdr.jpeg out/x_hdr16.png out/x_hdr10_pq.heic
+    python -m hdrgainmap.validate out/x_ultrahdr.jpeg out/x_hdr16_pq.png
 """
 from __future__ import annotations
 
@@ -632,8 +628,25 @@ def validate_png16(blob: bytes, path: str = "", deep: bool = True) -> Report:
         rep.err("缺少 cICP（播放器无法知道这是 BT.2020 + PQ）")
     elif len(cicp) != 4:
         rep.err(f"cICP 长度 {len(cicp)}（应为 4）")
-    elif tuple(cicp) not in ((9, 16, 0, 1), (9, 18, 0, 1)):
-        rep.err(f"cICP={tuple(cicp)}（应为 (9,16,0,1)=BT.2020/PQ 或 (9,18,0,1)=BT.2020/HLG）")
+    elif tuple(cicp) != (9, 16, 0, 1):
+        rep.err(f"cICP={tuple(cicp)}（应为 (9,16,0,1)=BT.2020/PQ）")
+
+    mdcv = chunks.get("mDCV", [None])[0]
+    if mdcv is None:
+        rep.warn("缺少 mDCV（母版亮度与色域未声明）")
+    elif len(mdcv) != 24:
+        rep.err(f"mDCV 长度 {len(mdcv)}（应为 24）")
+    else:
+        rep.info["master_max_nits"] = round(_u32(mdcv, 16) * 1e-4, 3)
+        rep.info["master_min_nits"] = round(_u32(mdcv, 20) * 1e-4, 4)
+
+    clli = chunks.get("cLLI", [None])[0]
+    if clli is None:
+        rep.warn("缺少 cLLI（内容峰值亮度未声明）")
+    elif len(clli) != 8:
+        rep.err(f"cLLI 长度 {len(clli)}（应为 8）")
+    else:
+        rep.info["maxcll_nits"] = round(_u32(clli, 0) * 1e-4, 1)
 
     phys = chunks.get("pHYs", [None])[0]
     if phys is None:
@@ -790,11 +803,7 @@ def validate_avif(blob: bytes, path: str = "", deep: bool = True,
 
 def validate_jxl(blob: bytes, path: str = "", deep: bool = True,
                  expect_transfer: str | None = None) -> Report:
-    """检查 24bit JXL 的容器签名、位深与 Rec.2100 色彩编码。
-
-    位深/传递函数只能靠 jxlinfo 读；没有 jxlinfo 时退化为签名检查并给出警告，
-    不把"文件能打开"误报成"24bit 正确"。
-    """
+    """检查 24bit JXL 的签名、位深与 Rec.2100；无 jxlinfo 时退化为签名检查。"""
     from . import jxl as jxlmod
 
     rep = Report("jxl", path)
@@ -826,6 +835,11 @@ def validate_jxl(blob: bytes, path: str = "", deep: bool = True,
     primaries = str(info.get("primaries", ""))
     if primaries and "2100" not in primaries:
         rep.err(f"原色 {primaries!r}（应为 Rec.2100）")
+    dpi = jxlmod.exif_dpi(blob)
+    if dpi is None:
+        rep.warn("容器里没有 Exif DPI（JXL 无原生分辨率字段）")
+    else:
+        rep.info["dpi"] = round(dpi, 2)
     return rep
 
 

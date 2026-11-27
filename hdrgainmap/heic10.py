@@ -1,14 +1,8 @@
-"""HDR HEIC（HEVC Main10 / Main12 + BT.2020 + PQ/HLG）。
+"""HDR HEIC：HEVC Main10/Main12 + BT.2020 + PQ/HLG。
 
-要点：
-  · 10bit 兼容性最好（Windows/macOS/iOS/Android 都认）；
-    12bit（Main12）色深更高，但 Windows 自带的 HEVC 扩展解不了，
-    会报 0xC00D3E8C —— 需要系统装 HEVC 视频扩展/第三方解码器。
-  · 颜色必须写全：primaries=9(BT.2020)、transfer=16(PQ)/18(HLG)、
-    matrix=9(BT.2020 NCL)。matrix 不写会落成 6(BT.601)，部分解码器
-    按 601 反矩阵，颜色直接偏。
-  · HEIF 容器没有 DPI 字段，只能借 EXIF 的 XResolution/YResolution 携带，
-    Windows/WIC 会读，多数第三方 App 不看。
+10bit 兼容性最好；Main12 在 Windows 自带解码器上会报 0xC00D3E8C。
+颜色写全 nclx(9,16/18,9)：matrix 落成 6(BT.601) 会偏色。
+HEIF 无 DPI 字段，只能借 EXIF 282/283/296。
 """
 from __future__ import annotations
 

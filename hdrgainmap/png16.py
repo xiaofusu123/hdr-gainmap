@@ -1,8 +1,7 @@
-"""16bit PQ/HLG 的 HDR PNG（IHDR 16bit RGB + cICP 标记 + pHYs）。
+"""16bit PQ 的 HDR PNG：IHDR 16bit RGB + cICP(9,16,0,1) + mDCV/cLLI + pHYs。
 
-PNG 规范只允许 8/16bit，没有 10bit；16bit PQ 是超集，能承载同样的精度。
-cICP(9,16,0,1) = BT.2020 原色 / PQ 传递 / RGB / 全范围；HLG 时传递值写 18。
-Chrome/Edge/Win11 认这个标记，缺了会按 sRGB 显示。
+PNG 只有 8/16bit；16bit PQ 在 0–203 nits 约有 38055 个码值，精度足够。
+mDCV 描述 BT.2020 / 1000 nits 母版，cLLI 写实际峰值；缺 cICP 时查看器按 sRGB 解释。
 """
 from __future__ import annotations
 
@@ -12,6 +11,11 @@ import zlib
 import numpy as np
 
 BPP = 6          # 3 通道 × 2 字节
+
+# BT.2020 原色与 D65（单位 0.00002，mDCV 规定的定点）
+_MDCV_PRIMARIES = (35400, 14600, 8500, 39850, 6550, 2300, 15635, 16450)
+_MDCV_MAX_NITS = 1000.0
+_MDCV_MIN_NITS = 0.005
 
 
 def _chunk(tag: bytes, data: bytes) -> bytes:
@@ -56,18 +60,23 @@ def _filter(raw: bytes, w: int, h: int) -> bytes:
 
 
 def encode(q16: np.ndarray, dpi: float = 240.0, software: str = "hdr-gainmap",
-           transfer: str = "PQ") -> bytes:
-    """q16: (h,w,3) uint16 的 PQ/HLG 码值 → PNG 字节（cICP 传递值 16/18）。"""
+           peak_nits: float | None = None) -> bytes:
+    """q16 (h,w,3) uint16 PQ 码值 → PNG 字节；给 peak_nits 时写 mDCV/cLLI。"""
     h, w, _ = q16.shape
     ppm = int(round(dpi / 0.0254))                       # 每米像素数
-    trc = 18 if transfer.upper() == "HLG" else 16
-    head = (b"\x89PNG\r\n\x1a\n"
-            + _chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 16, 2, 0, 0, 0))
-            + _chunk(b"cICP", bytes([9, trc, 0, 1]))
-            + _chunk(b"tEXt", b"Software\x00" + software.encode("ascii"))
-            + _chunk(b"pHYs", struct.pack(">IIB", ppm, ppm, 1)))
+    chunks = (b"\x89PNG\r\n\x1a\n"
+              + _chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 16, 2, 0, 0, 0))
+              + _chunk(b"cICP", bytes([9, 16, 0, 1]))
+              + _chunk(b"mDCV", struct.pack(">8HII", *_MDCV_PRIMARIES,
+                                            int(round(_MDCV_MAX_NITS / 1e-4)),
+                                            int(round(_MDCV_MIN_NITS / 1e-4))))
+              + _chunk(b"tEXt", b"Software\x00" + software.encode("ascii"))
+              + _chunk(b"pHYs", struct.pack(">IIB", ppm, ppm, 1)))
+    if peak_nits is not None and peak_nits > 0:
+        units = int(round(float(peak_nits) / 1e-4))
+        chunks += _chunk(b"cLLI", struct.pack(">II", units, units))
     body = _chunk(b"IDAT", _filter(q16.astype(">u2").tobytes(), w, h))
-    return head + body + _chunk(b"IEND", b"")
+    return chunks + body + _chunk(b"IEND", b"")
 
 
 def _ihdr_size(blob: bytes) -> tuple[int, int]:
@@ -112,11 +121,7 @@ def _unfilter_fast(raw: bytes, w: int, h: int) -> np.ndarray:
 
 
 def decode(blob: bytes, fast: bool = True) -> np.ndarray:
-    """反向解析，返回 (h,w,3) uint16。
-
-    ``fast=True`` 时优先借 ffmpeg 解成 rgb48le（比逐字节反滤波快两个数量级）；
-    没有 ffmpeg 或输出尺寸不符时退回 NumPy 实现。
-    """
+    """反向解析，返回 (h,w,3) uint16；fast 时优先借 ffmpeg 解 rgb48le。"""
     assert blob[:8] == b"\x89PNG\r\n\x1a\n"
     if fast:
         import shutil

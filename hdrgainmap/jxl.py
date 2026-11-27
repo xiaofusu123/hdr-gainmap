@@ -1,22 +1,17 @@
-"""24bit HDR JPEG XL：把 PQ/HLG 码值交给 cjxl（libjxl）无损封装。
+"""24bit HDR JPEG XL：PQ/HLG 码值经 PFM 交给 cjxl 无损封装。
 
-JPEG XL 的整数位深最高支持 32bit，这里固定用 24bit（每通道 3 字节），
-不是 8bit SDR：输入是 BT.2020 + PQ/HLG 的浮点码值，写入时按 24bit 整数保存，
-色彩编码显式标成 Rec.2100 PQ 或 Rec.2100 HLG。
-
-cjxl 不读 PNG 的 PQ 元数据（PNG 只有 16bit 整数），所以这里用 PFM 传浮点码值：
-PFM 的 float32 能无损装下 24bit 整数码值，cjxl 用 --override_bitdepth=24 量化，
-避免"16bit 重标成 24bit"的伪高位深。PFM 的行序是自下而上，写文件时要翻转。
-
-工具查找顺序：环境变量 HDRGAINMAP_CJXL / HDRGAINMAP_JXLINFO → PATH 里的
-cjxl / jxlinfo。cjxl 0.13+ 才有 --override_bitdepth。
+cjxl 不读 PNG 的 PQ 标记；PFM 的 float32 正好装下 24bit 整数码值，
+``--override_bitdepth=24`` 避免伪高位深。DPI 写容器 Exif box（JXL 无原生分辨率字段）。
+工具查找：HDRGAINMAP_CJXL / HDRGAINMAP_JXLINFO，其次 PATH。
 """
 from __future__ import annotations
 
 import os
 import re
 import shutil
+import struct
 import subprocess
+import tempfile
 from pathlib import Path
 
 CJXL_ENV = "HDRGAINMAP_CJXL"
@@ -53,11 +48,8 @@ def available() -> bool:
 
 
 def encode(pfm: str | Path, out: str | Path, transfer: str, *,
-           effort: int = 7) -> None:
-    """把 PQ/HLG 浮点 PFM 编码成 24bit JPEG XL（无损，-d 0）。
-
-    `transfer` 只接受 PQ/HLG；未知值直接报错，避免悄悄写错色彩标记。
-    """
+           effort: int = 7, dpi: float | None = None) -> None:
+    """PQ/HLG 浮点 PFM → 24bit JPEG XL（无损）；给 dpi 时写 Exif box。"""
     transfer = transfer.upper()
     if transfer not in _TRANSFER_NAMES:
         raise ValueError(f"JXL 传递函数必须是 PQ 或 HLG，收到 {transfer}")
@@ -72,20 +64,85 @@ def encode(pfm: str | Path, out: str | Path, transfer: str, *,
         "-x", f"color_space={_TRANSFER_NAMES[transfer]}",
         "-e", str(max(1, min(10, int(effort)))),
         "-d", "0",
+        "--compress_boxes=0",                         # Exif 明文，免 Brotli 依赖
         "--quiet",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    exif_path: Path | None = None
+    if dpi:
+        fd, name = tempfile.mkstemp(suffix=".exif", dir=str(Path(out).parent))
+        os.close(fd)
+        exif_path = Path(name)
+        exif_path.write_bytes(exif_tiff(dpi))
+        cmd += ["-x", f"exif={exif_path}"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    finally:
+        if exif_path is not None:
+            exif_path.unlink(missing_ok=True)
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip().splitlines()
         tail = detail[-1] if detail else f"exit {proc.returncode}"
         raise RuntimeError(f"cjxl 编码失败：{tail}")
 
 
-def info(path: str | Path) -> dict:
-    """用 jxlinfo 读位深、传递函数、原色与强度目标。
+def exif_tiff(dpi: float, software: str = "hdr-gainmap") -> bytes:
+    """构造写进 JXL Exif box 的 TIFF 载荷（小端、IFD0 只有分辨率与软件）。"""
+    from .ultrahdr import EXIF_ID, _exif
 
-    没有 jxlinfo 时返回空 dict；校验端会退化成只查文件签名。
-    """
+    return _exif(software, dpi=dpi)[len(EXIF_ID):]
+
+
+def exif_dpi(blob: bytes) -> float | None:
+    """从 JXL 容器的 Exif box 读 XResolution；没有 Exif 时返回 None。"""
+    if not blob.startswith(CONTAINER_MAGIC):
+        return None
+    pos = len(CONTAINER_MAGIC)
+    while pos + 8 <= len(blob):
+        size, kind = struct.unpack(">I4s", blob[pos:pos + 8])
+        header = 8
+        if size == 1:                               # 64 位 largesize
+            if pos + 16 > len(blob):
+                break
+            size = struct.unpack(">Q", blob[pos + 8:pos + 16])[0]
+            header = 16
+        if size < header:
+            break
+        if kind == b"Exif":
+            payload = blob[pos + header:pos + size]
+            if len(payload) < 4:
+                return None
+            skip = struct.unpack(">I", payload[:4])[0]   # TIFF 头相对负载起点的偏移
+            return _tiff_xres(payload[4 + skip:])
+        pos += size
+    return None
+
+
+def _tiff_xres(tiff: bytes) -> float | None:
+    """解析 TIFF IFD0，取 0x011A 有理数的商。"""
+    if len(tiff) < 8 or tiff[:2] not in (b"II", b"MM"):
+        return None
+    bo = "<" if tiff[:2] == b"II" else ">"
+    ifd = struct.unpack(bo + "I", tiff[4:8])[0]
+    if ifd + 2 > len(tiff):
+        return None
+    count = struct.unpack(bo + "H", tiff[ifd:ifd + 2])[0]
+    for i in range(count):
+        off = ifd + 2 + 12 * i
+        if off + 12 > len(tiff):
+            return None
+        tag, typ, n = struct.unpack(bo + "HHI", tiff[off:off + 8])
+        if tag != 0x011A or typ != 5 or n != 1:
+            continue
+        off_val = struct.unpack(bo + "I", tiff[off + 8:off + 12])[0]
+        if off_val + 8 > len(tiff):
+            return None
+        num, den = struct.unpack(bo + "II", tiff[off_val:off_val + 8])
+        return num / den if den else None
+    return None
+
+
+def info(path: str | Path) -> dict:
+    """用 jxlinfo 读位深、传递函数、原色；没有 jxlinfo 时返回空 dict。"""
     jxlinfo = jxlinfo_path()
     if jxlinfo is None:
         return {}
